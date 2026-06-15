@@ -11,6 +11,39 @@ let myUsername: string | null = null;
 // Helper function to delay execution
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Helper to download an image from the internet
+async function downloadImage(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    const tempDir = path.resolve(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    // Attempt to parse extensions or default to .jpg
+    let ext = '.jpg';
+    try {
+      const parsedUrl = new URL(url);
+      const pathname = parsedUrl.pathname;
+      const parsedExt = path.extname(pathname);
+      if (parsedExt && ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(parsedExt.toLowerCase())) {
+        ext = parsedExt;
+      }
+    } catch {}
+    
+    const filePath = path.join(tempDir, `temp_image_${Date.now()}${ext}`);
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+  } catch (err: any) {
+    console.warn(`      ⚠️ Error downloading image:`, err.message || err);
+    return null;
+  }
+}
+
 // Helper to find the installation path of Google Chrome on Windows
 function findChromePath(): string | undefined {
   const paths = [
@@ -141,10 +174,14 @@ async function postAINews(page: Page): Promise<boolean> {
 
   // Generate the tweet using Exa search and LLM, checking for AI similarity
   let tweetContent = '';
+  let imageUrl: string | undefined;
   let attempts = 0;
   const maxAttempts = 5;
   while (attempts < maxAttempts) {
-    tweetContent = await generateTweetFromNews();
+    const result = await generateTweetFromNews();
+    tweetContent = result.text;
+    imageUrl = result.imageUrl;
+
     const isDupOrSimilar = await isSimilarToRecentPosts(tweetContent);
     if (!isDupOrSimilar) {
       break;
@@ -154,25 +191,68 @@ async function postAINews(page: Page): Promise<boolean> {
   }
   console.log(`      Generated tweet content (length: ${tweetContent.length}):\n"${tweetContent}"`);
 
-  // Open Composer directly
-  console.log('      Opening tweet composer...');
-  await page.goto('https://x.com/compose/post', { waitUntil: 'load', timeout: 30000 });
-  await delay(4000);
+  let tempImagePath: string | null = null;
+  if (imageUrl) {
+    console.log(`      Found associated image URL: ${imageUrl}`);
+    console.log(`      Downloading image...`);
+    tempImagePath = await downloadImage(imageUrl);
+    if (tempImagePath) {
+      console.log(`      Successfully downloaded image to: ${tempImagePath}`);
+    } else {
+      console.log(`      ⚠️ Could not download image. Proceeding with text-only post.`);
+    }
+  }
 
-  // Focus and type directly using fresh selectors
-  await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
-  await page.click('[data-testid="tweetTextarea_0"]');
-  await delay(1000);
-  await page.keyboard.type(tweetContent, { delay: 50 });
-  await delay(2000);
+  try {
+    // Open Composer directly
+    console.log('      Opening tweet composer...');
+    await page.goto('https://x.com/compose/post', { waitUntil: 'load', timeout: 30000 });
+    await delay(4000);
 
-  // Click submit using selector
-  await page.waitForSelector('[data-testid="tweetButton"]', { timeout: 5000 });
-  await page.click('[data-testid="tweetButton"]');
-  await delay(5000);
-  console.log('   ✅ Tweet posted successfully!');
-  recordPostedText(tweetContent);
-  return true;
+    // If we have an image, upload it first
+    if (tempImagePath) {
+      try {
+        console.log('      Uploading image...');
+        const fileInputSelector = 'input[type="file"]';
+        await page.waitForSelector(fileInputSelector, { timeout: 10000 });
+        const inputElement = await page.$(fileInputSelector);
+        if (inputElement) {
+          await inputElement.uploadFile(tempImagePath);
+          console.log('      Image uploaded. Waiting for preview to render...');
+          await delay(5000);
+        } else {
+          console.warn('      ⚠️ File input element not found.');
+        }
+      } catch (uploadErr: any) {
+        console.error('      ⚠️ Failed to upload image:', uploadErr.message || uploadErr);
+      }
+    }
+
+    // Focus and type directly using fresh selectors
+    await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
+    await page.click('[data-testid="tweetTextarea_0"]');
+    await delay(1000);
+    await page.keyboard.type(tweetContent, { delay: 50 });
+    await delay(2000);
+
+    // Click submit using selector
+    await page.waitForSelector('[data-testid="tweetButton"]', { timeout: 5000 });
+    await page.click('[data-testid="tweetButton"]');
+    await delay(5000);
+    console.log('   ✅ Tweet posted successfully!');
+    recordPostedText(tweetContent);
+    return true;
+  } finally {
+    // Clean up temporary image file
+    if (tempImagePath && fs.existsSync(tempImagePath)) {
+      try {
+        fs.unlinkSync(tempImagePath);
+        console.log(`      Cleaned up temporary image file: ${tempImagePath}`);
+      } catch (cleanupErr: any) {
+        console.warn(`      ⚠️ Could not delete temporary image file:`, cleanupErr.message || cleanupErr);
+      }
+    }
+  }
 }
 
 // Action: Reply to a tweet
@@ -601,20 +681,12 @@ async function run() {
           await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
           await delay(5000);
 
-          // Sub-action Roll (40% Reply, 30% Repost, 30% Quote)
-          const subActionRoll = Math.random();
-          const shouldAlsoLike = Math.random() < 0.50; // 50% chance to also like the tweet we reply/repost/quote
-
-          if (subActionRoll < 0.40) {
-            if (shouldAlsoLike) await likeTweet(page);
-            success = await replyToTweet(page, tweetText, statusUrl);
-          } else if (subActionRoll < 0.70) {
-            if (shouldAlsoLike) await likeTweet(page);
-            success = await repostTweet(page, statusUrl);
-          } else {
-            if (shouldAlsoLike) await likeTweet(page);
-            success = await quoteTweet(page, tweetText, statusUrl);
+          // Sub-action: Only Repost (with a 50% chance to also like the tweet)
+          const shouldAlsoLike = Math.random() < 0.50;
+          if (shouldAlsoLike) {
+            await likeTweet(page);
           }
+          success = await repostTweet(page, statusUrl);
         }
       } catch (err: any) {
         console.error('   ❌ Error performing iteration action:', err.message || err);
@@ -633,9 +705,8 @@ async function run() {
         // In test mode, wait 15 seconds
         waitTimeSeconds = 15;
       } else {
-        // Randomize wait time between 3 minutes (180s) and 6 minutes (360s)
-        // This averages out to ~13-14 runs per hour (perfectly inside the 10-20 runs per hour requirement)
-        waitTimeSeconds = Math.floor(Math.random() * (360 - 180 + 1)) + 180;
+        // Randomize wait time between 2 minutes (120s) and 7 minutes (420s)
+        waitTimeSeconds = Math.floor(Math.random() * (420 - 120 + 1)) + 120;
       }
 
       console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);

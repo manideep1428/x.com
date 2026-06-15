@@ -235,10 +235,16 @@ export async function generateReplyWithSearch(tweetText: string): Promise<string
   );
 }
 
+export interface NewsArticle {
+  title: string;
+  url: string;
+  image: string | null;
+}
+
 /**
  * Fetches the latest AI and tech news from Exa.
  */
-export async function fetchLatestAINews(): Promise<string> {
+export async function fetchLatestAINews(): Promise<{ context: string; articles: NewsArticle[] }> {
   try {
     const exa = getExa();
     const oneDayAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
@@ -257,27 +263,33 @@ export async function fetchLatestAINews(): Promise<string> {
     );
     
     let searchContext = '';
+    const articles: NewsArticle[] = [];
     if (response.results && response.results.length > 0) {
       searchContext = response.results.map((res, i) => {
         const highlightStr = res.highlights ? res.highlights.join(' ') : '';
+        articles.push({
+          title: res.title || '',
+          url: res.url || '',
+          image: (res as any).image || null
+        });
         return `[Article ${i + 1}] Title: ${res.title}\nContext: ${highlightStr}\n`;
       }).join('\n');
     }
     
-    return searchContext;
+    return { context: searchContext, articles };
   } catch (error: any) {
     console.warn('      ⚠️ Exa news search failed:', error.message || error);
-    return '';
+    return { context: '', articles: [] };
   }
 }
 
 /**
  * Generates a tweet based on the latest AI news fetched from Exa.
  */
-export async function generateTweetFromNews(): Promise<string> {
-  const newsContext = await fetchLatestAINews();
+export async function generateTweetFromNews(): Promise<{ text: string; imageUrl?: string }> {
+  const news = await fetchLatestAINews();
   
-  if (!newsContext) {
+  if (!news.context || news.articles.length === 0) {
     console.log('      ⚠️ No news context available. Generating a general AI/tech topic post as fallback...');
     const generalPrompts = [
       "AI chip demand and GPU scaling bottlenecks",
@@ -287,17 +299,49 @@ export async function generateTweetFromNews(): Promise<string> {
       "software engineers trying to use AI to write code that they don't understand"
     ];
     const fallbackTopic = generalPrompts[Math.floor(Math.random() * generalPrompts.length)]!;
-    return generateTweet(fallbackTopic);
+    const text = await generateTweet(fallbackTopic);
+    return { text };
   }
   
   const prompt = `Here are some recent news articles and developments in artificial intelligence and tech:
-${newsContext}
+${news.context}
 
 Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
 
-Make sure the tweet content is completely self-contained (do not say "According to this article" or include links). Just write the commentary/post directly.`;
+Make sure the tweet content is completely self-contained (do not say "According to this article" or include links). Just write the commentary/post directly.
 
-  return generateText(prompt, TWEET_SYSTEM_PROMPT);
+Respond with a JSON object in this format:
+{
+  "selected_index": <number 1-5 indicating which article you commented on>,
+  "tweet": "<your post text>"
+}
+Ensure it is a valid JSON object. Do not include markdown code block formatting (like \`\`\`json).`;
+
+  try {
+    const responseText = await generateText(prompt, TWEET_SYSTEM_PROMPT);
+    let cleanText = responseText.trim();
+    if (cleanText.startsWith('```')) {
+      cleanText = cleanText.replace(/^```json\s*/, '').replace(/```$/, '').trim();
+    }
+    const data = JSON.parse(cleanText);
+    const index = Number(data.selected_index);
+    const text = data.tweet;
+    const selectedArticle = news.articles[index - 1];
+    return {
+      text,
+      imageUrl: selectedArticle?.image || undefined
+    };
+  } catch (e) {
+    console.warn("      ⚠️ Failed to parse LLM response as JSON. Falling back to direct generation.");
+    // Fallback: retry with simpler instructions or get direct text
+    const fallbackPrompt = `Here are some recent news articles and developments in artificial intelligence and tech:
+${news.context}
+
+Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
+Do not include links, write the post directly.`;
+    const text = await generateText(fallbackPrompt, TWEET_SYSTEM_PROMPT);
+    return { text };
+  }
 }
 
 /**
