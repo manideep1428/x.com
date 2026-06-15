@@ -239,6 +239,7 @@ export interface NewsArticle {
   title: string;
   url: string;
   image: string | null;
+  highlights: string[] | null;
 }
 
 /**
@@ -270,7 +271,8 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
         articles.push({
           title: res.title || '',
           url: res.url || '',
-          image: (res as any).image || null
+          image: (res as any).image || null,
+          highlights: res.highlights || null
         });
         return `[Article ${i + 1}] Title: ${res.title}\nContext: ${highlightStr}\n`;
       }).join('\n');
@@ -284,9 +286,62 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
 }
 
 /**
- * Generates a tweet based on the latest AI news fetched from Exa.
+ * Helper to filter out news articles that cover topics we have recently posted about.
  */
-export async function generateTweetFromNews(): Promise<{ text: string; imageUrl?: string }> {
+async function filterDuplicateNews(articles: NewsArticle[], recentPosts: string[]): Promise<NewsArticle[]> {
+  if (articles.length === 0 || recentPosts.length === 0) {
+    return articles;
+  }
+  
+  console.log(`      🤖 Filtering fetched news against ${recentPosts.length} recent posts...`);
+  
+  const articlesFormatted = articles.map((art, idx) => {
+    return `[Article ${idx + 1}] Title: ${art.title}\nUrl: ${art.url}`;
+  }).join('\n\n');
+  
+  const postsFormatted = recentPosts.map((post, idx) => `[Post ${idx + 1}] "${post.replace(/\n/g, ' ')}"`).join('\n');
+  
+  const prompt = `You are a tech/AI news filtering agent.
+We want to avoid publishing posts about news events, company updates, or specific announcements that we have already posted about recently.
+
+Here are our last 15 posts:
+${postsFormatted}
+
+Here are the candidate news articles we just fetched:
+${articlesFormatted}
+
+Identify which candidate articles are about the exact same news story, product launch, company update, or specific event as any of our recent posts.
+For example, if we posted about "Anthropic Claude 3.5 Fable jailbreak" and a candidate article is about "Anthropic's Fable model being bricked", they cover the same topic and that article is a duplicate topic.
+
+Respond with a JSON array of 1-based indices containing ONLY the articles that are NEW and DISTINCT (not covering any topic we recently posted about).
+Format: [index1, index2, ...]
+Example: If articles 1, 3, and 5 cover new distinct topics, return: [1, 3, 5]
+If none of the articles are distinct, return: []
+Do not include markdown code block formatting (like \`\`\`json). Return ONLY the raw JSON array.`;
+
+  try {
+    const responseText = await generateText(prompt, "Respond with only a JSON array of numbers.");
+    let cleanText = responseText.trim();
+    if (cleanText.startsWith('```')) {
+      cleanText = cleanText.replace(/^```json\s*/, '').replace(/```$/, '').trim();
+    }
+    const distinctIndices: number[] = JSON.parse(cleanText);
+    const distinctArticles = distinctIndices
+      .map(idx => articles[idx - 1])
+      .filter((art): art is NewsArticle => !!art);
+    
+    console.log(`      🤖 Filtered out ${articles.length - distinctArticles.length} duplicate/similar news topics.`);
+    return distinctArticles;
+  } catch (err: any) {
+    console.warn("      ⚠️ Error filtering duplicate news with LLM, using all articles as fallback:", err.message || err);
+    return articles;
+  }
+}
+
+/**
+ * Generates a tweet based on the latest AI news fetched from Exa, avoiding topics in recentPosts.
+ */
+export async function generateTweetFromNews(recentPosts: string[] = []): Promise<{ text: string; imageUrl?: string }> {
   const news = await fetchLatestAINews();
   
   if (!news.context || news.articles.length === 0) {
@@ -303,8 +358,35 @@ export async function generateTweetFromNews(): Promise<{ text: string; imageUrl?
     return { text };
   }
   
+  // Filter the fetched articles based on recent posts
+  const distinctArticles = await filterDuplicateNews(news.articles, recentPosts);
+  
+  if (distinctArticles.length === 0) {
+    console.log('      ⚠️ All fetched news articles are similar to recent posts. Generating a distinct general AI/tech topic post...');
+    const prompt = `Here are the last 15 posts we made:
+${recentPosts.map((post, idx) => `[Post ${idx + 1}] "${post}"`).join('\n')}
+
+We want to post about a general AI or software engineering topic that is NOT related to any of these recent posts.
+Choose or generate a topic from this list (or create a new similar engineering/AI topic):
+- AI chip demand and GPU scaling bottlenecks
+- the hype cycle of new LLM releases and benchmarks
+- why local-first AI models running on consumer devices are better than cloud APIs
+- VC funding trends in AI startups building wrapper apps
+- software engineers trying to use AI to write code that they don't understand
+
+Write a short, witty, cynical post (under 280 characters) about the chosen topic. Ensure the topic is distinct from the recent posts.`;
+    const text = await generateText(prompt, TWEET_SYSTEM_PROMPT);
+    return { text };
+  }
+
+  // Format context for only the distinct articles
+  const distinctContext = distinctArticles.map((art, idx) => {
+    const highlightStr = art.highlights ? art.highlights.join(' ') : '';
+    return `[Article ${idx + 1}] Title: ${art.title}\nContext: ${highlightStr}\n`;
+  }).join('\n');
+  
   const prompt = `Here are some recent news articles and developments in artificial intelligence and tech:
-${news.context}
+${distinctContext}
 
 Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
 
@@ -312,7 +394,7 @@ Make sure the tweet content is completely self-contained (do not say "According 
 
 Respond with a JSON object in this format:
 {
-  "selected_index": <number 1-5 indicating which article you commented on>,
+  "selected_index": <number 1-${distinctArticles.length} indicating which article you commented on>,
   "tweet": "<your post text>"
 }
 Ensure it is a valid JSON object. Do not include markdown code block formatting (like \`\`\`json).`;
@@ -326,7 +408,7 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     const data = JSON.parse(cleanText);
     const index = Number(data.selected_index);
     const text = data.tweet;
-    const selectedArticle = news.articles[index - 1];
+    const selectedArticle = distinctArticles[index - 1];
     return {
       text,
       imageUrl: selectedArticle?.image || undefined
@@ -335,7 +417,7 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     console.warn("      ⚠️ Failed to parse LLM response as JSON. Falling back to direct generation.");
     // Fallback: retry with simpler instructions or get direct text
     const fallbackPrompt = `Here are some recent news articles and developments in artificial intelligence and tech:
-${news.context}
+${distinctContext}
 
 Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
 Do not include links, write the post directly.`;

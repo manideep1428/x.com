@@ -139,3 +139,12 @@ export function recordInteractedUrl(url: string): void {
   saveMemory(memory);
   console.log(`      💾 Saved interacted URL to persistent memory. Total remembered URLs: ${memory.interactedUrls.length}`);
 }
+
+/**
+ * Retrieves the last N posts from persistent memory.
+ */
+export function getRecentPostedTexts(limit: number = 15): string[] {
+  const memory = loadMemory();
+  return memory.postedTexts.slice(0, limit);
+}
+

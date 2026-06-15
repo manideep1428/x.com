@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { generateText, generateReplyWithSearch, generateTweetFromNews, isTechRelated } from './llm';
 import { QUOTE_SYSTEM_PROMPT } from './prompt';
-import { isSimilarToRecentPosts, recordPostedText, hasInteractedWithUrl, recordInteractedUrl } from './memory';
+import { isSimilarToRecentPosts, recordPostedText, hasInteractedWithUrl, recordInteractedUrl, getRecentPostedTexts } from './memory';
 
 // Cache for the bot's username to prevent self-interaction
 let myUsername: string | null = null;
@@ -178,7 +178,8 @@ async function postAINews(page: Page): Promise<boolean> {
   let attempts = 0;
   const maxAttempts = 5;
   while (attempts < maxAttempts) {
-    const result = await generateTweetFromNews();
+    const recentPosts = getRecentPostedTexts(15);
+    const result = await generateTweetFromNews(recentPosts);
     tweetContent = result.text;
     imageUrl = result.imageUrl;
 
