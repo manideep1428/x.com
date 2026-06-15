@@ -340,7 +340,7 @@ async function run() {
   }
 
   const browser = await puppeteer.launch({
-    headless: false,
+    headless: true,
     executablePath: chromePath,
     userDataDir,
     defaultViewport: {
