@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { generateText, generateReplyWithSearch, generateTweetFromNews, isTechRelated } from './llm';
 import { QUOTE_SYSTEM_PROMPT } from './prompt';
+import { isSimilarToRecentPosts, recordPostedText, hasInteractedWithUrl, recordInteractedUrl } from './memory';
 
 // Cache for the bot's username to prevent self-interaction
 let myUsername: string | null = null;
@@ -138,8 +139,19 @@ async function scrollFeed(page: Page, targetCount: number): Promise<void> {
 async function postAINews(page: Page): Promise<boolean> {
   console.log('   🔥 Action: Creating a new post based on latest AI/tech news...');
 
-  // Generate the tweet using Exa search and LLM
-  const tweetContent = await generateTweetFromNews();
+  // Generate the tweet using Exa search and LLM, checking for AI similarity
+  let tweetContent = '';
+  let attempts = 0;
+  const maxAttempts = 5;
+  while (attempts < maxAttempts) {
+    tweetContent = await generateTweetFromNews();
+    const isDupOrSimilar = await isSimilarToRecentPosts(tweetContent);
+    if (!isDupOrSimilar) {
+      break;
+    }
+    console.log(`      ⚠️ Generated tweet is a duplicate or too similar to recent posts. Regenerating (attempt ${attempts + 1}/${maxAttempts})...`);
+    attempts++;
+  }
   console.log(`      Generated tweet content (length: ${tweetContent.length}):\n"${tweetContent}"`);
 
   // Open Composer directly
@@ -159,11 +171,12 @@ async function postAINews(page: Page): Promise<boolean> {
   await page.click('[data-testid="tweetButton"]');
   await delay(5000);
   console.log('   ✅ Tweet posted successfully!');
+  recordPostedText(tweetContent);
   return true;
 }
 
 // Action: Reply to a tweet
-async function replyToTweet(page: Page, tweetText: string): Promise<boolean> {
+async function replyToTweet(page: Page, tweetText: string, statusUrl: string): Promise<boolean> {
   console.log('   ✍️ Sub-Action: Replying to the selected tweet...');
 
   // Fail-safe check: do not reply if the current tweet detail page is our own tweet
@@ -182,7 +195,19 @@ async function replyToTweet(page: Page, tweetText: string): Promise<boolean> {
     }
   }
 
-  const replyContent = await generateReplyWithSearch(tweetText);
+  // Generate the reply and check for AI similarity
+  let replyContent = '';
+  let attempts = 0;
+  const maxAttempts = 5;
+  while (attempts < maxAttempts) {
+    replyContent = await generateReplyWithSearch(tweetText);
+    const isDupOrSimilar = await isSimilarToRecentPosts(replyContent);
+    if (!isDupOrSimilar) {
+      break;
+    }
+    console.log(`      ⚠️ Generated reply is a duplicate or too similar to recent posts. Regenerating (attempt ${attempts + 1}/${maxAttempts})...`);
+    attempts++;
+  }
   console.log(`      Generated reply:\n"${replyContent}"`);
 
   // Interact with composer text area using fresh selectors
@@ -197,11 +222,13 @@ async function replyToTweet(page: Page, tweetText: string): Promise<boolean> {
   await page.click('[data-testid="tweetButtonInline"]');
   await delay(5000);
   console.log('   ✅ Reply posted successfully!');
+  recordPostedText(replyContent);
+  recordInteractedUrl(statusUrl);
   return true;
 }
 
 // Action: Repost (Retweet)
-async function repostTweet(page: Page): Promise<boolean> {
+async function repostTweet(page: Page, statusUrl: string): Promise<boolean> {
   console.log('   🔄 Sub-Action: Reposting the selected tweet...');
 
   await page.waitForSelector('[data-testid="retweet"]', { timeout: 10000 });
@@ -212,11 +239,12 @@ async function repostTweet(page: Page): Promise<boolean> {
   await page.click('[data-testid="retweetConfirm"]');
   await delay(4000);
   console.log('   ✅ Reposted successfully!');
+  recordInteractedUrl(statusUrl);
   return true;
 }
 
 // Action: Quote Repost (Repost with thoughts)
-async function quoteTweet(page: Page, tweetText: string): Promise<boolean> {
+async function quoteTweet(page: Page, tweetText: string, statusUrl: string): Promise<boolean> {
   console.log('   💬 Sub-Action: Quote-Reposting the selected tweet...');
 
   // Fail-safe check: do not quote-repost if the current tweet detail page is our own tweet
@@ -235,10 +263,22 @@ async function quoteTweet(page: Page, tweetText: string): Promise<boolean> {
     }
   }
 
-  const commentary = await generateText(
-    `Write a short comment quote-tweeting this: "${tweetText}"`,
-    QUOTE_SYSTEM_PROMPT
-  );
+  // Generate quote commentary and check for AI similarity
+  let commentary = '';
+  let attempts = 0;
+  const maxAttempts = 5;
+  while (attempts < maxAttempts) {
+    commentary = await generateText(
+      `Write a short comment quote-tweeting this: "${tweetText}"`,
+      QUOTE_SYSTEM_PROMPT
+    );
+    const isDupOrSimilar = await isSimilarToRecentPosts(commentary);
+    if (!isDupOrSimilar) {
+      break;
+    }
+    console.log(`      ⚠️ Generated commentary is a duplicate or too similar to recent posts. Regenerating (attempt ${attempts + 1}/${maxAttempts})...`);
+    attempts++;
+  }
   console.log(`      Generated quote thoughts:\n"${commentary}"`);
 
   await page.waitForSelector('[data-testid="retweet"]', { timeout: 10000 });
@@ -261,6 +301,8 @@ async function quoteTweet(page: Page, tweetText: string): Promise<boolean> {
   await page.click('[data-testid="tweetButton"]');
   await delay(5000);
   console.log('   ✅ Quote reposted successfully!');
+  recordPostedText(commentary);
+  recordInteractedUrl(statusUrl);
   return true;
 }
 
@@ -474,27 +516,32 @@ async function run() {
             }
           }
 
-          // Filter out our own tweets from timeline feed
-          let filteredTweets = gatheredTweets;
-          if (myUsername) {
-            filteredTweets = gatheredTweets.filter((t) => {
+          // Filter out our own tweets and previously interacted tweets from timeline feed
+          let filteredTweets = gatheredTweets.filter((t) => {
+            // Check persistent history memory first
+            if (hasInteractedWithUrl(t.url)) {
+              console.log(`      Skipping previously interacted tweet: ${t.url}`);
+              return false;
+            }
+
+            if (myUsername) {
               try {
                 const urlObj = new URL(t.url);
                 const pathSegments = urlObj.pathname.split('/').filter(Boolean);
                 const author = pathSegments[0];
-                if (author && author.toLowerCase() === myUsername!.toLowerCase()) {
+                if (author && author.toLowerCase() === myUsername.toLowerCase()) {
                   console.log(`      Skipping own tweet in timeline: ${t.url}`);
                   return false;
                 }
               } catch {
                 // Ignore URL parsing issues
               }
-              return true;
-            });
-          }
+            }
+            return true;
+          });
 
           if (filteredTweets.length < 5) {
-            console.log('      ⚠️ Too few tweets after filtering out own tweets. Skipping feed action in this iteration.');
+            console.log('      ⚠️ Too few tweets after filtering out own and interacted tweets. Skipping feed action in this iteration.');
             continue;
           }
 
@@ -560,13 +607,13 @@ async function run() {
 
           if (subActionRoll < 0.40) {
             if (shouldAlsoLike) await likeTweet(page);
-            success = await replyToTweet(page, tweetText);
+            success = await replyToTweet(page, tweetText, statusUrl);
           } else if (subActionRoll < 0.70) {
             if (shouldAlsoLike) await likeTweet(page);
-            success = await repostTweet(page);
+            success = await repostTweet(page, statusUrl);
           } else {
             if (shouldAlsoLike) await likeTweet(page);
-            success = await quoteTweet(page, tweetText);
+            success = await quoteTweet(page, tweetText, statusUrl);
           }
         }
       } catch (err: any) {
