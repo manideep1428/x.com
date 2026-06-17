@@ -429,316 +429,328 @@ async function run() {
     console.log('⚠️ Google Chrome installation not found. Falling back to default Chromium.');
   }
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: chromePath,
-    userDataDir,
-    defaultViewport: {
-      width: 1280,
-      height: 800,
-    },
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-blink-features=AutomationControlled',
-    ],
-  });
-
-  try {
-    const pages = await browser.pages();
-    const page = pages[0] || (await browser.newPage());
-
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Inject webdriver evasion
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
+  let i = 1;
+  while (true) {
+    let browser: any = null;
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: chromePath,
+        userDataDir,
+        defaultViewport: {
+          width: 1280,
+          height: 800,
+        },
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-blink-features=AutomationControlled',
+        ],
       });
-    });
 
-    // Set Twitter Session Cookie if available in environment
-    const twitterAuthToken = process.env.TWITTER_AUTH_TOKEN;
-    if (twitterAuthToken) {
-      console.log('🔑 Injecting auth_token session cookie...');
-      await page.setCookie({
-        name: 'auth_token',
-        value: twitterAuthToken,
-        domain: '.x.com',
-        path: '/',
-        secure: true,
-        httpOnly: true,
+      const pages = await browser.pages();
+      const page = pages[0] || (await browser.newPage());
+
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      );
+
+      // Inject webdriver evasion
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+        });
       });
-    }
 
-    console.log('🌐 Loading X/Twitter...');
-    await page.goto('https://x.com/home', { waitUntil: 'load', timeout: 60000 });
-    await delay(5000);
+      // Set Twitter Session Cookie if available in environment
+      const twitterAuthToken = process.env.TWITTER_AUTH_TOKEN;
+      if (twitterAuthToken) {
+        console.log('🔑 Injecting auth_token session cookie...');
+        await page.setCookie({
+          name: 'auth_token',
+          value: twitterAuthToken,
+          domain: '.x.com',
+          path: '/',
+          secure: true,
+          httpOnly: true,
+        });
+      }
 
-    // Initial Login Verification
-    let loggedIn = await checkLoginStatus(page);
-    if (!loggedIn) {
-      console.log('⚠️ No active session detected.');
-      console.log('👉 Please complete the login process manually in the opened browser window.');
-      console.log('⏳ Watching browser window for successful login...');
+      console.log('🌐 Loading X/Twitter...');
+      await page.goto('https://x.com/home', { waitUntil: 'load', timeout: 60000 });
+      await delay(5000);
 
-      const startTime = Date.now();
-      const timeoutMs = 5 * 60 * 1000;
-      let lastMessageTime = 0;
+      // Initial Login Verification
+      let loggedIn = await checkLoginStatus(page);
+      if (!loggedIn) {
+        console.log('⚠️ No active session detected.');
+        console.log('👉 Please complete the login process manually in the opened browser window.');
+        console.log('⏳ Watching browser window for successful login...');
 
-      while (!loggedIn) {
-        if (Date.now() - startTime > timeoutMs) {
-          throw new Error('Timeout: User did not log in within 5 minutes.');
+        const startTime = Date.now();
+        const timeoutMs = 5 * 60 * 1000;
+        let lastMessageTime = 0;
+
+        while (!loggedIn) {
+          if (Date.now() - startTime > timeoutMs) {
+            throw new Error('Timeout: User did not log in within 5 minutes.');
+          }
+
+          if (Date.now() - lastMessageTime > 10000) {
+            console.log('   Waiting for manual login...');
+            lastMessageTime = Date.now();
+          }
+
+          loggedIn = await checkLoginStatus(page);
+          if (loggedIn) {
+            console.log('🎉 Login detected! Finalizing session details...');
+            await delay(5000);
+
+            try {
+              const cookies = await page.cookies();
+              const authTokenCookie = cookies.find(c => c.name === 'auth_token');
+              if (authTokenCookie && authTokenCookie.value) {
+                console.log('💾 Saving new auth_token to .env...');
+                updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
+                process.env.TWITTER_AUTH_TOKEN = authTokenCookie.value;
+                console.log('✅ auth_token saved to .env!');
+              }
+            } catch (cookieErr: any) {
+              console.warn('⚠️ Failed to save auth_token to .env:', cookieErr.message || cookieErr);
+            }
+
+            console.log('💾 Session successfully saved!');
+            break;
+          }
+          await delay(2000);
         }
+      } else {
+        console.log('🎉 Session restored! Logged in successfully.');
 
-        if (Date.now() - lastMessageTime > 10000) {
-          console.log('   Waiting for manual login...');
-          lastMessageTime = Date.now();
+        try {
+          const cookies = await page.cookies();
+          const authTokenCookie = cookies.find(c => c.name === 'auth_token');
+          if (authTokenCookie && authTokenCookie.value && process.env.TWITTER_AUTH_TOKEN !== authTokenCookie.value) {
+            console.log('💾 Syncing auth_token to .env...');
+            updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
+            process.env.TWITTER_AUTH_TOKEN = authTokenCookie.value;
+            console.log('✅ auth_token synced to .env!');
+          }
+        } catch (cookieErr: any) {
+          console.warn('⚠️ Failed to sync auth_token to .env:', cookieErr.message || cookieErr);
         }
+      }
 
-        loggedIn = await checkLoginStatus(page);
-        if (loggedIn) {
-          console.log('🎉 Login detected! Finalizing session details...');
+      // Retrieve and cache current username
+      myUsername = await getCurrentUsername(page);
+      if (myUsername) {
+        console.log(`👤 Logged in as: @${myUsername}`);
+      } else {
+        console.log('⚠️ Could not automatically detect logged in username.');
+      }
+
+      // --- Start Scheduling Loop ---
+      while (true) {
+        const iterStr = isTestMode ? `${i} of 2` : `${i}`;
+        console.log(`\n========================================`);
+        console.log(`⏰ ITERATION [${iterStr}] - Timestamp: ${new Date().toLocaleTimeString()}`);
+        console.log(`========================================`);
+
+        // Ensure we start from home page
+        if (page.url() !== 'https://x.com/home' && !page.url().includes('https://x.com/home')) {
+          console.log('🌐 Returning to home page...');
+          await page.goto('https://x.com/home', { waitUntil: 'load', timeout: 30000 });
           await delay(5000);
-
-          try {
-            const cookies = await page.cookies();
-            const authTokenCookie = cookies.find(c => c.name === 'auth_token');
-            if (authTokenCookie && authTokenCookie.value) {
-              console.log('💾 Saving new auth_token to .env...');
-              updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
-              process.env.TWITTER_AUTH_TOKEN = authTokenCookie.value;
-              console.log('✅ auth_token saved to .env!');
-            }
-          } catch (cookieErr: any) {
-            console.warn('⚠️ Failed to save auth_token to .env:', cookieErr.message || cookieErr);
-          }
-
-          console.log('💾 Session successfully saved!');
-          break;
         }
-        await delay(2000);
-      }
-    } else {
-      console.log('🎉 Session restored! Logged in successfully.');
 
-      try {
-        const cookies = await page.cookies();
-        const authTokenCookie = cookies.find(c => c.name === 'auth_token');
-        if (authTokenCookie && authTokenCookie.value && process.env.TWITTER_AUTH_TOKEN !== authTokenCookie.value) {
-          console.log('💾 Syncing auth_token to .env...');
-          updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
-          process.env.TWITTER_AUTH_TOKEN = authTokenCookie.value;
-          console.log('✅ auth_token synced to .env!');
-        }
-      } catch (cookieErr: any) {
-        console.warn('⚠️ Failed to sync auth_token to .env:', cookieErr.message || cookieErr);
-      }
-    }
+        // Roll a random action:
+        // - 60% Post Trend (actionRoll < 0.60)
+        // - 20% Quote Repost (actionRoll >= 0.60 && actionRoll < 0.80)
+        // - 20% Reply to Feed Tweet (actionRoll >= 0.80)
+        const actionRoll = Math.random();
+        let success = false;
 
-    // Retrieve and cache current username
-    myUsername = await getCurrentUsername(page);
-    if (myUsername) {
-      console.log(`👤 Logged in as: @${myUsername}`);
-    } else {
-      console.log('⚠️ Could not automatically detect logged in username.');
-    }
+        try {
+          if (actionRoll < 0.60) {
+            // Action 1: Post about latest AI/tech news
+            success = await postAINews(page);
+          } else {
+            const isQuote = actionRoll < 0.80;
+            // Action 2 & 3: Interact with timeline tweet
+            console.log(`   📰 Action: Interacting with a timeline tweet (${isQuote ? 'Quote Repost' : 'Reply'})...`);
 
-    // --- Start Scheduling Loop ---
-    let i = 1;
-    while (true) {
-      const iterStr = isTestMode ? `${i} of 2` : `${i}`;
-      console.log(`\n========================================`);
-      console.log(`⏰ ITERATION [${iterStr}] - Timestamp: ${new Date().toLocaleTimeString()}`);
-      console.log(`========================================`);
+            // Scroll feed to ensure 20+ tweets are loaded
+            await scrollFeed(page, 22);
 
-      // Ensure we start from home page
-      if (page.url() !== 'https://x.com/home' && !page.url().includes('https://x.com/home')) {
-        console.log('🌐 Returning to home page...');
-        await page.goto('https://x.com/home', { waitUntil: 'load', timeout: 30000 });
-        await delay(5000);
-      }
+            // Extract all tweet text and status URLs inside the page execution context
+            // This avoids passing ElementHandles that could become detached.
+            const gatheredTweets = await page.evaluate(() => {
+              const tweetElements = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+              return tweetElements.map((el) => {
+                const textEl = el.querySelector('[data-testid="tweetText"]');
+                const text = textEl ? textEl.textContent || '' : '';
 
-      // Roll a random action:
-      // - 60% Post Trend (actionRoll < 0.60)
-      // - 20% Quote Repost (actionRoll >= 0.60 && actionRoll < 0.80)
-      // - 20% Reply to Feed Tweet (actionRoll >= 0.80)
-      const actionRoll = Math.random();
-      let success = false;
+                const links = Array.from(el.querySelectorAll('a')) as HTMLAnchorElement[];
+                const statusLink = links.find((link) => link.href.includes('/status/'));
+                const url = statusLink ? statusLink.href : '';
 
-      try {
-        if (actionRoll < 0.60) {
-          // Action 1: Post about latest AI/tech news
-          success = await postAINews(page);
-        } else {
-          const isQuote = actionRoll < 0.80;
-          // Action 2 & 3: Interact with timeline tweet
-          console.log(`   📰 Action: Interacting with a timeline tweet (${isQuote ? 'Quote Repost' : 'Reply'})...`);
+                return { text, url };
+              }).filter((t) => t.url !== '');
+            });
 
-          // Scroll feed to ensure 20+ tweets are loaded
-          await scrollFeed(page, 22);
+            console.log(`      Total visible tweets gathered: ${gatheredTweets.length}`);
 
-          // Extract all tweet text and status URLs inside the page execution context
-          // This avoids passing ElementHandles that could become detached.
-          const gatheredTweets = await page.evaluate(() => {
-            const tweetElements = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-            return tweetElements.map((el) => {
-              const textEl = el.querySelector('[data-testid="tweetText"]');
-              const text = textEl ? textEl.textContent || '' : '';
-
-              const links = Array.from(el.querySelectorAll('a')) as HTMLAnchorElement[];
-              const statusLink = links.find((link) => link.href.includes('/status/'));
-              const url = statusLink ? statusLink.href : '';
-
-              return { text, url };
-            }).filter((t) => t.url !== '');
-          });
-
-          console.log(`      Total visible tweets gathered: ${gatheredTweets.length}`);
-
-          if (!myUsername) {
-            myUsername = await getCurrentUsername(page);
-            if (myUsername) {
-              console.log(`      👤 Detected username in timeline check: @${myUsername}`);
-            }
-          }
-
-          // Filter out our own tweets and previously interacted tweets from timeline feed
-          let filteredTweets = gatheredTweets.filter((t) => {
-            // Check persistent history memory first
-            if (hasInteractedWithUrl(t.url)) {
-              console.log(`      Skipping previously interacted tweet: ${t.url}`);
-              return false;
-            }
-
-            if (myUsername) {
-              try {
-                const urlObj = new URL(t.url);
-                const pathSegments = urlObj.pathname.split('/').filter(Boolean);
-                const author = pathSegments[0];
-                if (author && author.toLowerCase() === myUsername.toLowerCase()) {
-                  console.log(`      Skipping own tweet in timeline: ${t.url}`);
-                  return false;
-                }
-              } catch {
-                // Ignore URL parsing issues
+            if (!myUsername) {
+              myUsername = await getCurrentUsername(page);
+              if (myUsername) {
+                console.log(`      👤 Detected username in timeline check: @${myUsername}`);
               }
             }
-            return true;
-          });
 
-          if (filteredTweets.length < 5) {
-            console.log('      ⚠️ Too few tweets after filtering out own and interacted tweets. Skipping feed action in this iteration.');
-            continue;
-          }
+            // Filter out our own tweets and previously interacted tweets from timeline feed
+            let filteredTweets = gatheredTweets.filter((t) => {
+              // Check persistent history memory first
+              if (hasInteractedWithUrl(t.url)) {
+                console.log(`      Skipping previously interacted tweet: ${t.url}`);
+                return false;
+              }
 
-          let targetIndex = -1;
-          let selectedTweet: { text: string; url: string } | null = null;
-          let attempts = 0;
-          const maxAttempts = 5;
+              if (myUsername) {
+                try {
+                  const urlObj = new URL(t.url);
+                  const pathSegments = urlObj.pathname.split('/').filter(Boolean);
+                  const author = pathSegments[0];
+                  if (author && author.toLowerCase() === myUsername.toLowerCase()) {
+                    console.log(`      Skipping own tweet in timeline: ${t.url}`);
+                    return false;
+                  }
+                } catch {
+                  // Ignore URL parsing issues
+                }
+              }
+              return true;
+            });
 
-          // Shuffle indices between 5 and clamp(25, filteredTweets.length - 1) to search for a tech tweet
-          const startIndex = Math.min(5, filteredTweets.length - 1);
-          const endIndex = Math.min(25, filteredTweets.length - 1);
-
-          const candidateIndices: number[] = [];
-          for (let idx = startIndex; idx <= endIndex; idx++) {
-            candidateIndices.push(idx);
-          }
-          // Shuffle
-          for (let j = candidateIndices.length - 1; j > 0; j--) {
-            const k = Math.floor(Math.random() * (j + 1));
-            [candidateIndices[j], candidateIndices[k]] = [candidateIndices[k]!, candidateIndices[j]!];
-          }
-
-          console.log(`      Scanning candidates for a tech/AI related tweet...`);
-          for (const candidateIdx of candidateIndices) {
-            if (attempts >= maxAttempts) {
-              console.log(`      Reached max attempts (${maxAttempts}) checking for tech/AI tweets.`);
-              break;
+            if (filteredTweets.length < 5) {
+              console.log('      ⚠️ Too few tweets after filtering out own and interacted tweets. Skipping feed action in this iteration.');
+              continue;
             }
 
-            const candidateTweet = filteredTweets[candidateIdx]!;
-            attempts++;
-            console.log(`      [Attempt ${attempts}] Checking candidate at index ${candidateIdx}...`);
-            const isTech = await isTechRelated(candidateTweet.text);
+            let targetIndex = -1;
+            let selectedTweet: { text: string; url: string } | null = null;
+            let attempts = 0;
+            const maxAttempts = 5;
 
-            if (isTech) {
-              targetIndex = candidateIdx;
-              selectedTweet = candidateTweet;
-              console.log(`      ✅ Found tech/AI related tweet at index ${candidateIdx}!`);
-              break;
+            // Shuffle indices between 5 and clamp(25, filteredTweets.length - 1) to search for a tech tweet
+            const startIndex = Math.min(5, filteredTweets.length - 1);
+            const endIndex = Math.min(25, filteredTweets.length - 1);
+
+            const candidateIndices: number[] = [];
+            for (let idx = startIndex; idx <= endIndex; idx++) {
+              candidateIndices.push(idx);
+            }
+            // Shuffle
+            for (let j = candidateIndices.length - 1; j > 0; j--) {
+              const k = Math.floor(Math.random() * (j + 1));
+              [candidateIndices[j], candidateIndices[k]] = [candidateIndices[k]!, candidateIndices[j]!];
+            }
+
+            console.log(`      Scanning candidates for a tech/AI related tweet...`);
+            for (const candidateIdx of candidateIndices) {
+              if (attempts >= maxAttempts) {
+                console.log(`      Reached max attempts (${maxAttempts}) checking for tech/AI tweets.`);
+                break;
+              }
+
+              const candidateTweet = filteredTweets[candidateIdx]!;
+              attempts++;
+              console.log(`      [Attempt ${attempts}] Checking candidate at index ${candidateIdx}...`);
+              const isTech = await isTechRelated(candidateTweet.text);
+
+              if (isTech) {
+                targetIndex = candidateIdx;
+                selectedTweet = candidateTweet;
+                console.log(`      ✅ Found tech/AI related tweet at index ${candidateIdx}!`);
+                break;
+              } else {
+                console.log(`      ❌ Candidate at index ${candidateIdx} is not tech/AI related.`);
+              }
+            }
+
+            if (!selectedTweet) {
+              console.log('      ⚠️ No tech/AI related tweets found in the candidate range. Skipping feed action in this iteration.');
+              continue;
+            }
+
+            const tweetText = selectedTweet.text;
+            const statusUrl = selectedTweet.url;
+
+            console.log(`      Selected tweet at index ${targetIndex}...`);
+            console.log(`      Found tweet content: "${tweetText.substring(0, 80).replace(/\n/g, ' ')}..."`);
+            console.log(`      Navigating to tweet detail page: ${statusUrl}`);
+
+            await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
+            await delay(5000);
+
+            // Sub-action: Like the tweet with a 50% chance
+            const shouldAlsoLike = Math.random() < 0.50;
+            if (shouldAlsoLike) {
+              await likeTweet(page);
+            }
+
+            if (isQuote) {
+              success = await quoteTweet(page, tweetText, statusUrl);
             } else {
-              console.log(`      ❌ Candidate at index ${candidateIdx} is not tech/AI related.`);
+              success = await replyToTweet(page, tweetText, statusUrl);
             }
           }
-
-          if (!selectedTweet) {
-            console.log('      ⚠️ No tech/AI related tweets found in the candidate range. Skipping feed action in this iteration.');
-            continue;
-          }
-
-          const tweetText = selectedTweet.text;
-          const statusUrl = selectedTweet.url;
-
-          console.log(`      Selected tweet at index ${targetIndex}...`);
-          console.log(`      Found tweet content: "${tweetText.substring(0, 80).replace(/\n/g, ' ')}..."`);
-          console.log(`      Navigating to tweet detail page: ${statusUrl}`);
-
-          await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
-          await delay(5000);
-
-          // Sub-action: Like the tweet with a 50% chance
-          const shouldAlsoLike = Math.random() < 0.50;
-          if (shouldAlsoLike) {
-            await likeTweet(page);
-          }
-
-          if (isQuote) {
-            success = await quoteTweet(page, tweetText, statusUrl);
-          } else {
-            success = await replyToTweet(page, tweetText, statusUrl);
-          }
+        } catch (err: any) {
+          console.error('   ❌ Error performing iteration action:', err.message || err);
         }
-      } catch (err: any) {
-        console.error('   ❌ Error performing iteration action:', err.message || err);
+
+        console.log(`📢 Iteration ${i} complete. Success status: ${success ? 'YES' : 'NO'}`);
+
+        // Check exit condition for test mode
+        if (isTestMode && i >= 2) {
+          console.log('\n🌟 All scheduled iterations completed successfully!');
+          return;
+        }
+
+        // Calculate delay before the next action using JS random timer math
+        let waitTimeSeconds = 0;
+        if (isTestMode) {
+          // In test mode, wait 15 seconds
+          waitTimeSeconds = 15;
+        } else {
+          // Randomize wait time between 2 minutes (120s) and 7 minutes (420s)
+          waitTimeSeconds = Math.floor(Math.random() * (420 - 120 + 1)) + 120;
+        }
+
+        console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);
+        await delay(waitTimeSeconds * 1000);
+        i++;
       }
-
-      console.log(`📢 Iteration ${i} complete. Success status: ${success ? 'YES' : 'NO'}`);
-
-      // Check exit condition for test mode
-      if (isTestMode && i >= 2) {
-        break;
-      }
-
-      // Calculate delay before the next action using JS random timer math
-      let waitTimeSeconds = 0;
+    } catch (error: any) {
+      console.error('❌ Error in scheduler run:', error.message || error);
       if (isTestMode) {
-        // In test mode, wait 15 seconds
-        waitTimeSeconds = 15;
-      } else {
-        // Randomize wait time between 2 minutes (120s) and 7 minutes (420s)
-        waitTimeSeconds = Math.floor(Math.random() * (420 - 120 + 1)) + 120;
+        console.log('🛑 Test mode failure, exiting.');
+        return;
       }
-
-      console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);
-      await delay(waitTimeSeconds * 1000);
-      i++;
+      console.log('⏳ Waiting for 1 minute (60s) before auto-restarting the browser and automation...');
+      await delay(60 * 1000);
+    } finally {
+      if (browser) {
+        console.log('🔌 Closing browser...');
+        try {
+          await browser.close();
+        } catch (closeErr: any) {
+          console.warn('⚠️ Error closing browser:', closeErr.message || closeErr);
+        }
+      }
     }
-
-    console.log('\n🌟 All scheduled iterations completed successfully!');
-
-  } catch (error: any) {
-    console.error('❌ Error in scheduler run:', error.message || error);
-  } finally {
-    console.log('🔌 Closing browser...');
-    await browser.close();
-    console.log('👋 Done!');
   }
 }
 
