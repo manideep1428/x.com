@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import Exa from 'exa-js';
 import { GoogleGenAI } from '@google/genai';
-import { TWEET_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT } from './prompt';
+import { TWEET_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT, HARSH_TWEET_SYSTEM_PROMPT } from './prompt';
 
 let openaiClients: Record<string, OpenAI> = {};
 let googleClient: GoogleGenAI | null = null;
@@ -240,26 +240,100 @@ export interface NewsArticle {
   url: string;
   image: string | null;
   highlights: string[] | null;
+  imageLinks?: string[] | null;
 }
 
 /**
- * Fetches the latest AI and tech news from Exa.
+ * Generates a specific tech-related search query dynamically from a set of categories.
+ */
+export async function generateTechTrendQuery(): Promise<string> {
+  const categories = [
+    "semiconductor chips, GPU hardware engineering, CUDA, Blackwell, AMD, or TSMC fabrication",
+    "compiler optimizations, LLM inference engines, llama.cpp, vLLM, TensorRT, or WebAssembly AI runtime",
+    "databases, vector search, pgvector, Qdrant, Milvus, or database scaling architectures",
+    "agentic AI frameworks, LangChain, CrewAI, Autogen, or browser automation agents",
+    "systems programming languages, Rust, WebAssembly, Zig, or Go in modern backend infrastructure",
+    "local LLMs, edge computing, Ollama, apple silicon optimization, or on-device intelligence",
+    "frontend framework wars, Next.js, Vite, React Server Components, or build tooling updates",
+    "open-source AI models, Hugging Face trends, fine-tuning techniques, LoRA, or quantization breakthroughs",
+    "developer tools, GitHub Copilot alternatives, LSP protocols, or code generation models",
+    "cloud infrastructure scaling, Kubernetes, serverless compute, or edge caching for AI applications"
+  ];
+  
+  const selectedCategory = categories[Math.floor(Math.random() * categories.length)];
+  
+  const prompt = `Generate a single, highly specific search query to find the latest trending developments, news articles, blog posts, or research updates in this tech category: "${selectedCategory}".
+The query should be optimized for a search engine to return the most interesting developer-centric news or announcements from the past 48 hours.
+Do not use search operators (like AND, OR, site:). Return ONLY the query keywords.
+Example: "nvidia blackwell gpu benchmarks performance" or "vllm inference optimization llama 3" or "rust webassembly compiler performance updates".
+Return only the query text.`;
+
+  try {
+    const query = await generateText(prompt, "Respond with only the search query.");
+    console.log(`      💡 Generated tech trend search query for category [${selectedCategory}]: "${query}"`);
+    return query;
+  } catch (error) {
+    console.warn("⚠️ Failed to generate tech trend query dynamically, using fallback query.");
+    return "latest tech developments open source compiler database backend";
+  }
+}
+
+/**
+ * Searches specifically for an image on Exa related to the given topic.
+ */
+export async function searchForImage(topic: string): Promise<string | undefined> {
+  const exaKey = process.env.EXA_API_KEY;
+  if (!exaKey || exaKey === 'your_exa_api_key_here') return undefined;
+
+  try {
+    const exa = getExa();
+    console.log(`      🔍 Deep searching Exa specifically for an image on: "${topic}"...`);
+    const searchRes = await exa.search(`${topic} photo image`, {
+      numResults: 3,
+      contents: {
+        extras: {
+          imageLinks: 5
+        } as any
+      }
+    });
+    for (const res of searchRes.results) {
+      if (res.image) return res.image;
+      const extraLinks = (res as any).imageLinks;
+      if (extraLinks && extraLinks.length > 0) {
+        return extraLinks[0];
+      }
+    }
+  } catch (err: any) {
+    console.warn(`      ⚠️ Failed to search for fallback image:`, err.message || err);
+  }
+  return undefined;
+}
+
+/**
+ * Fetches the latest tech/AI news from Exa using a dynamically generated topic.
  */
 export async function fetchLatestAINews(): Promise<{ context: string; articles: NewsArticle[] }> {
   try {
+    const query = await generateTechTrendQuery();
     const exa = getExa();
     const oneDayAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     
-    console.log('      🔍 Searching Exa for latest AI/tech developments...');
+    console.log(`      🔍 Deep searching Exa for latest developments on: "${query}"...`);
     const response = await exa.searchAndContents(
-      "latest AI news developments chips companies NVIDIA OpenAI Anthropic startup model",
+      query,
       {
         numResults: 5,
         startPublishedDate: oneDayAgo,
         highlights: {
           numSentences: 3
         },
-        category: "news"
+        category: "news",
+        contents: {
+          highlights: true,
+          extras: {
+            imageLinks: 5
+          }
+        } as any
       }
     );
     
@@ -272,7 +346,8 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
           title: res.title || '',
           url: res.url || '',
           image: (res as any).image || null,
-          highlights: res.highlights || null
+          highlights: res.highlights || null,
+          imageLinks: (res as any).imageLinks || null
         });
         return `[Article ${i + 1}] Title: ${res.title}\nContext: ${highlightStr}\n`;
       }).join('\n');
@@ -341,7 +416,13 @@ Do not include markdown code block formatting (like \`\`\`json). Return ONLY the
 /**
  * Generates a tweet based on the latest AI news fetched from Exa, avoiding topics in recentPosts.
  */
-export async function generateTweetFromNews(recentPosts: string[] = []): Promise<{ text: string; imageUrl?: string }> {
+export async function generateTweetFromNews(
+  recentPosts: string[] = [],
+  options?: { isHarsh?: boolean }
+): Promise<{ text: string; imageUrls?: string[] }> {
+  const isHarsh = options?.isHarsh ?? false;
+  const systemInstruction = isHarsh ? HARSH_TWEET_SYSTEM_PROMPT : TWEET_SYSTEM_PROMPT;
+  
   const news = await fetchLatestAINews();
   
   if (!news.context || news.articles.length === 0) {
@@ -354,8 +435,17 @@ export async function generateTweetFromNews(recentPosts: string[] = []): Promise
       "software engineers trying to use AI to write code that they don't understand"
     ];
     const fallbackTopic = generalPrompts[Math.floor(Math.random() * generalPrompts.length)]!;
-    const text = await generateTweet(fallbackTopic);
-    return { text };
+    
+    // Search for a fallback image to maximize photos
+    let fallbackImageUrls: string[] = [];
+    const foundImg = await searchForImage(fallbackTopic);
+    if (foundImg) {
+      fallbackImageUrls.push(foundImg);
+    }
+    
+    const prompt = `Write a short post about this trend: "${fallbackTopic}"`;
+    const text = await generateText(prompt, systemInstruction);
+    return { text, imageUrls: fallbackImageUrls };
   }
   
   // Filter the fetched articles based on recent posts
@@ -375,12 +465,27 @@ Choose or generate a topic from this list (or create a new similar engineering/A
 - software engineers trying to use AI to write code that they don't understand
 
 Write a short, witty, cynical post (under 280 characters) about the chosen topic. Ensure the topic is distinct from the recent posts.`;
-    const text = await generateText(prompt, TWEET_SYSTEM_PROMPT);
-    return { text };
+    const text = await generateText(prompt, systemInstruction);
+    
+    let fallbackImageUrls: string[] = [];
+    const foundImg = await searchForImage(text);
+    if (foundImg) {
+      fallbackImageUrls.push(foundImg);
+    }
+    return { text, imageUrls: fallbackImageUrls };
   }
 
-  // Format context for only the distinct articles
-  const distinctContext = distinctArticles.map((art, idx) => {
+  // Prioritize articles that have images to achieve "max time photos"
+  let candidateArticles = distinctArticles.filter(art => !!art.image || (art.imageLinks && art.imageLinks.length > 0));
+  if (candidateArticles.length === 0) {
+    console.log('      ⚠️ No candidate articles have images. Using all distinct articles as candidates.');
+    candidateArticles = distinctArticles;
+  } else {
+    console.log(`      📸 Found ${candidateArticles.length} candidate articles with images (prioritizing them).`);
+  }
+
+  // Format context for only the distinct candidate articles
+  const distinctContext = candidateArticles.map((art, idx) => {
     const highlightStr = art.highlights ? art.highlights.join(' ') : '';
     return `[Article ${idx + 1}] Title: ${art.title}\nContext: ${highlightStr}\n`;
   }).join('\n');
@@ -394,13 +499,13 @@ Make sure the tweet content is completely self-contained (do not say "According 
 
 Respond with a JSON object in this format:
 {
-  "selected_index": <number 1-${distinctArticles.length} indicating which article you commented on>,
+  "selected_index": <number 1-${candidateArticles.length} indicating which article you commented on>,
   "tweet": "<your post text>"
 }
 Ensure it is a valid JSON object. Do not include markdown code block formatting (like \`\`\`json).`;
 
   try {
-    const responseText = await generateText(prompt, TWEET_SYSTEM_PROMPT);
+    const responseText = await generateText(prompt, systemInstruction);
     let cleanText = responseText.trim();
     if (cleanText.startsWith('```')) {
       cleanText = cleanText.replace(/^```json\s*/, '').replace(/```$/, '').trim();
@@ -408,10 +513,33 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     const data = JSON.parse(cleanText);
     const index = Number(data.selected_index);
     const text = data.tweet;
-    const selectedArticle = distinctArticles[index - 1];
+    const selectedArticle = candidateArticles[index - 1] || candidateArticles[0];
+    
+    // Build candidate image URLs
+    const candidateUrls: string[] = [];
+    if (selectedArticle?.image) {
+      candidateUrls.push(selectedArticle.image);
+    }
+    if (selectedArticle?.imageLinks && selectedArticle.imageLinks.length > 0) {
+      for (const link of selectedArticle.imageLinks) {
+        if (link && !candidateUrls.includes(link)) {
+          candidateUrls.push(link);
+        }
+      }
+    }
+    
+    // If no image is available, search for one
+    if (candidateUrls.length === 0 && selectedArticle) {
+      console.log(`      ⚠️ Selected article "${selectedArticle.title}" has no image. Searching for a fallback image...`);
+      const fallbackImg = await searchForImage(selectedArticle.title);
+      if (fallbackImg) {
+        candidateUrls.push(fallbackImg);
+      }
+    }
+
     return {
       text,
-      imageUrl: selectedArticle?.image || undefined
+      imageUrls: candidateUrls
     };
   } catch (e) {
     console.warn("      ⚠️ Failed to parse LLM response as JSON. Falling back to direct generation.");
@@ -421,8 +549,26 @@ ${distinctContext}
 
 Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
 Do not include links, write the post directly.`;
-    const text = await generateText(fallbackPrompt, TWEET_SYSTEM_PROMPT);
-    return { text };
+    const text = await generateText(fallbackPrompt, systemInstruction);
+    
+    const candidateUrls: string[] = [];
+    for (const art of candidateArticles) {
+      if (art.image) candidateUrls.push(art.image);
+      if (art.imageLinks) {
+        for (const link of art.imageLinks) {
+          if (link && !candidateUrls.includes(link)) candidateUrls.push(link);
+        }
+      }
+    }
+    
+    if (candidateUrls.length === 0) {
+      const fallbackImg = await searchForImage(text);
+      if (fallbackImg) {
+        candidateUrls.push(fallbackImg);
+      }
+    }
+
+    return { text, imageUrls: candidateUrls };
   }
 }
 

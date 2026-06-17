@@ -3,6 +3,7 @@ node_modules/
 
 # Puppeteer/Browser User Data & Profiles
 user_data/
+user_data_whatsapp/
 .chrome/
 
 # Environment Variables & Credentials
@@ -48,5 +49,9 @@ logs/
 # OS & System Files
 .DS_Store
 Thumbs.db
+
+
+
+wat*.ts
 temp/
 

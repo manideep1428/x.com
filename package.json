@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bun run index.ts",
     "start:test": "bun run index.ts --test",
-    "test-llm": "bun run test-llm.ts"
+    "test-llm": "bun run test-llm.ts",
+    "wat": "bun run wat.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

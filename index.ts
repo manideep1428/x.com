@@ -172,16 +172,19 @@ async function scrollFeed(page: Page, targetCount: number): Promise<void> {
 async function postAINews(page: Page): Promise<boolean> {
   console.log('   🔥 Action: Creating a new post based on latest AI/tech news...');
 
+  const isHarsh = Math.random() < 0.70;
+  console.log(`      Tone selection: ${isHarsh ? 'HARSH (70% probability)' : 'NORMAL (30% probability)'}`);
+
   // Generate the tweet using Exa search and LLM, checking for AI similarity
   let tweetContent = '';
-  let imageUrl: string | undefined;
+  let imageUrls: string[] | undefined;
   let attempts = 0;
   const maxAttempts = 5;
   while (attempts < maxAttempts) {
     const recentPosts = getRecentPostedTexts(15);
-    const result = await generateTweetFromNews(recentPosts);
+    const result = await generateTweetFromNews(recentPosts, { isHarsh });
     tweetContent = result.text;
-    imageUrl = result.imageUrl;
+    imageUrls = result.imageUrls;
 
     const isDupOrSimilar = await isSimilarToRecentPosts(tweetContent);
     if (!isDupOrSimilar) {
@@ -193,14 +196,20 @@ async function postAINews(page: Page): Promise<boolean> {
   console.log(`      Generated tweet content (length: ${tweetContent.length}):\n"${tweetContent}"`);
 
   let tempImagePath: string | null = null;
-  if (imageUrl) {
-    console.log(`      Found associated image URL: ${imageUrl}`);
-    console.log(`      Downloading image...`);
-    tempImagePath = await downloadImage(imageUrl);
-    if (tempImagePath) {
-      console.log(`      Successfully downloaded image to: ${tempImagePath}`);
-    } else {
-      console.log(`      ⚠️ Could not download image. Proceeding with text-only post.`);
+  if (imageUrls && imageUrls.length > 0) {
+    console.log(`      Found candidate image URLs:`, imageUrls);
+    for (const url of imageUrls) {
+      console.log(`      Downloading image from: ${url}...`);
+      tempImagePath = await downloadImage(url);
+      if (tempImagePath) {
+        console.log(`      Successfully downloaded image to: ${tempImagePath}`);
+        break;
+      } else {
+        console.log(`      ⚠️ Failed to download image from: ${url}. Trying next candidate...`);
+      }
+    }
+    if (!tempImagePath) {
+      console.log(`      ⚠️ Could not download any of the candidate images. Proceeding with text-only post.`);
     }
   }
 
@@ -556,18 +565,20 @@ async function run() {
       }
 
       // Roll a random action:
-      // - 40% Post Trend (actionRoll < 0.40)
-      // - 60% Interact with Feed Tweet (actionRoll >= 0.40)
+      // - 60% Post Trend (actionRoll < 0.60)
+      // - 20% Quote Repost (actionRoll >= 0.60 && actionRoll < 0.80)
+      // - 20% Reply to Feed Tweet (actionRoll >= 0.80)
       const actionRoll = Math.random();
       let success = false;
 
       try {
-        if (actionRoll < 0.40) {
+        if (actionRoll < 0.60) {
           // Action 1: Post about latest AI/tech news
           success = await postAINews(page);
         } else {
-          // Action 2: Interact with top 10-20 feed tweet
-          console.log('   📰 Action: Interacting with a timeline tweet...');
+          const isQuote = actionRoll < 0.80;
+          // Action 2 & 3: Interact with timeline tweet
+          console.log(`   📰 Action: Interacting with a timeline tweet (${isQuote ? 'Quote Repost' : 'Reply'})...`);
 
           // Scroll feed to ensure 20+ tweets are loaded
           await scrollFeed(page, 22);
@@ -682,12 +693,17 @@ async function run() {
           await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
           await delay(5000);
 
-          // Sub-action: Only Repost (with a 50% chance to also like the tweet)
+          // Sub-action: Like the tweet with a 50% chance
           const shouldAlsoLike = Math.random() < 0.50;
           if (shouldAlsoLike) {
             await likeTweet(page);
           }
-          success = await repostTweet(page, statusUrl);
+
+          if (isQuote) {
+            success = await quoteTweet(page, tweetText, statusUrl);
+          } else {
+            success = await replyToTweet(page, tweetText, statusUrl);
+          }
         }
       } catch (err: any) {
         console.error('   ❌ Error performing iteration action:', err.message || err);
