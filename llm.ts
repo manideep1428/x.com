@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import Exa from 'exa-js';
 import { GoogleGenAI } from '@google/genai';
-import { TWEET_SYSTEM_PROMPT, REPLY_SYSTEM_PROMPT, HARSH_TWEET_SYSTEM_PROMPT } from './prompt';
+import { TWEET_SYSTEM_PROMPT, HARSH_TWEET_SYSTEM_PROMPT, REPLY_GOOD_PROMPT, REPLY_BAD_PROMPT, REPLY_STRAIGHT_PROMPT } from './prompt';
 
 let openaiClients: Record<string, OpenAI> = {};
 let googleClient: GoogleGenAI | null = null;
@@ -155,13 +155,25 @@ export async function generateTweet(topic: string): Promise<string> {
  * @returns The generated reply string.
  */
 export async function generateReplyWithSearch(tweetText: string): Promise<string> {
+  // Select a reply tone: good, bad, or straight
+  const replyTones = ['good', 'bad', 'straight'] as const;
+  const tone = replyTones[Math.floor(Math.random() * replyTones.length)]!;
+  console.log(`      Selected reply tone: ${tone.toUpperCase()}`);
+
+  let systemInstruction = REPLY_STRAIGHT_PROMPT;
+  if (tone === 'good') {
+    systemInstruction = REPLY_GOOD_PROMPT;
+  } else if (tone === 'bad') {
+    systemInstruction = REPLY_BAD_PROMPT;
+  }
+
   // Check if Exa is configured
   const exaKey = process.env.EXA_API_KEY;
   if (!exaKey || exaKey === 'your_exa_api_key_here') {
     console.log('   ⚠️ EXA_API_KEY is not configured. Skipping web search and replying directly.');
     return generateText(
       `Write a concise reply to this tweet: "${tweetText}"`,
-      REPLY_SYSTEM_PROMPT
+      systemInstruction
     );
   }
 
@@ -216,7 +228,7 @@ export async function generateReplyWithSearch(tweetText: string): Promise<string
           `${searchContext}\n` +
           `Using this context to ensure factual accuracy, write a concise, conversational reply to the tweet.`;
 
-        return generateText(promptWithContext, REPLY_SYSTEM_PROMPT);
+        return generateText(promptWithContext, systemInstruction);
       } else {
         console.log('      ⚠️ Web search returned no results. Falling back to direct reply.');
       }
@@ -231,7 +243,7 @@ export async function generateReplyWithSearch(tweetText: string): Promise<string
   // Fallback direct reply
   return generateText(
     `Write a concise reply to this tweet: "${tweetText}"`,
-    REPLY_SYSTEM_PROMPT
+    systemInstruction
   );
 }
 
@@ -436,16 +448,10 @@ export async function generateTweetFromNews(
     ];
     const fallbackTopic = generalPrompts[Math.floor(Math.random() * generalPrompts.length)]!;
     
-    // Search for a fallback image to maximize photos
-    let fallbackImageUrls: string[] = [];
-    const foundImg = await searchForImage(fallbackTopic);
-    if (foundImg) {
-      fallbackImageUrls.push(foundImg);
-    }
-    
     const prompt = `Write a short post about this trend: "${fallbackTopic}"`;
     const text = await generateText(prompt, systemInstruction);
-    return { text, imageUrls: fallbackImageUrls };
+    // Text-only is the default normal behavior. No fallback image searches.
+    return { text, imageUrls: [] };
   }
   
   // Filter the fetched articles based on recent posts
@@ -467,22 +473,12 @@ Choose or generate a topic from this list (or create a new similar engineering/A
 Write a short, witty, cynical post (under 280 characters) about the chosen topic. Ensure the topic is distinct from the recent posts.`;
     const text = await generateText(prompt, systemInstruction);
     
-    let fallbackImageUrls: string[] = [];
-    const foundImg = await searchForImage(text);
-    if (foundImg) {
-      fallbackImageUrls.push(foundImg);
-    }
-    return { text, imageUrls: fallbackImageUrls };
+    // Text-only is the default normal behavior. No fallback image searches.
+    return { text, imageUrls: [] };
   }
 
-  // Prioritize articles that have images to achieve "max time photos"
-  let candidateArticles = distinctArticles.filter(art => !!art.image || (art.imageLinks && art.imageLinks.length > 0));
-  if (candidateArticles.length === 0) {
-    console.log('      ⚠️ No candidate articles have images. Using all distinct articles as candidates.');
-    candidateArticles = distinctArticles;
-  } else {
-    console.log(`      📸 Found ${candidateArticles.length} candidate articles with images (prioritizing them).`);
-  }
+  // Treat all distinct articles normally (no image prioritization)
+  let candidateArticles = distinctArticles;
 
   // Format context for only the distinct candidate articles
   const distinctContext = candidateArticles.map((art, idx) => {
@@ -500,7 +496,8 @@ Make sure the tweet content is completely self-contained (do not say "According 
 Respond with a JSON object in this format:
 {
   "selected_index": <number 1-${candidateArticles.length} indicating which article you commented on>,
-  "tweet": "<your post text>"
+  "tweet": "<your post text>",
+  "image_required": <boolean, set to true ONLY if the post content absolutely requires a visual/image reference to be understood or effective, otherwise false>
 }
 Ensure it is a valid JSON object. Do not include markdown code block formatting (like \`\`\`json).`;
 
@@ -513,27 +510,21 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     const data = JSON.parse(cleanText);
     const index = Number(data.selected_index);
     const text = data.tweet;
+    const imageRequired = !!data.image_required;
     const selectedArticle = candidateArticles[index - 1] || candidateArticles[0];
     
-    // Build candidate image URLs
+    // Build candidate image URLs ONLY if the AI explicitly marked it as required
     const candidateUrls: string[] = [];
-    if (selectedArticle?.image) {
-      candidateUrls.push(selectedArticle.image);
-    }
-    if (selectedArticle?.imageLinks && selectedArticle.imageLinks.length > 0) {
-      for (const link of selectedArticle.imageLinks) {
-        if (link && !candidateUrls.includes(link)) {
-          candidateUrls.push(link);
-        }
+    if (imageRequired && selectedArticle) {
+      if (selectedArticle.image) {
+        candidateUrls.push(selectedArticle.image);
       }
-    }
-    
-    // If no image is available, search for one
-    if (candidateUrls.length === 0 && selectedArticle) {
-      console.log(`      ⚠️ Selected article "${selectedArticle.title}" has no image. Searching for a fallback image...`);
-      const fallbackImg = await searchForImage(selectedArticle.title);
-      if (fallbackImg) {
-        candidateUrls.push(fallbackImg);
+      if (selectedArticle.imageLinks && selectedArticle.imageLinks.length > 0) {
+        for (const link of selectedArticle.imageLinks) {
+          if (link && !candidateUrls.includes(link)) {
+            candidateUrls.push(link);
+          }
+        }
       }
     }
 
@@ -543,7 +534,7 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     };
   } catch (e) {
     console.warn("      ⚠️ Failed to parse LLM response as JSON. Falling back to direct generation.");
-    // Fallback: retry with simpler instructions or get direct text
+    // Fallback: retry with simpler instructions or get direct text (text-only)
     const fallbackPrompt = `Here are some recent news articles and developments in artificial intelligence and tech:
 ${distinctContext}
 
@@ -551,24 +542,7 @@ Choose the most interesting, significant, or hype-worthy development from the li
 Do not include links, write the post directly.`;
     const text = await generateText(fallbackPrompt, systemInstruction);
     
-    const candidateUrls: string[] = [];
-    for (const art of candidateArticles) {
-      if (art.image) candidateUrls.push(art.image);
-      if (art.imageLinks) {
-        for (const link of art.imageLinks) {
-          if (link && !candidateUrls.includes(link)) candidateUrls.push(link);
-        }
-      }
-    }
-    
-    if (candidateUrls.length === 0) {
-      const fallbackImg = await searchForImage(text);
-      if (fallbackImg) {
-        candidateUrls.push(fallbackImg);
-      }
-    }
-
-    return { text, imageUrls: candidateUrls };
+    return { text, imageUrls: [] };
   }
 }
 

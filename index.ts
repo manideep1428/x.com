@@ -567,18 +567,18 @@ async function run() {
         }
 
         // Roll a random action:
-        // - 60% Post Trend (actionRoll < 0.60)
-        // - 20% Quote Repost (actionRoll >= 0.60 && actionRoll < 0.80)
-        // - 20% Reply to Feed Tweet (actionRoll >= 0.80)
+        // - 75% Post Trend (actionRoll < 0.75)
+        // - 15% Quote Repost (actionRoll >= 0.75 && actionRoll < 0.90)
+        // - 10% Reply to Feed Tweet (actionRoll >= 0.90)
         const actionRoll = Math.random();
         let success = false;
 
         try {
-          if (actionRoll < 0.60) {
+          if (actionRoll < 0.75) {
             // Action 1: Post about latest AI/tech news
             success = await postAINews(page);
           } else {
-            const isQuote = actionRoll < 0.80;
+            const isQuote = actionRoll < 0.90;
             // Action 2 & 3: Interact with timeline tweet
             console.log(`   📰 Action: Interacting with a timeline tweet (${isQuote ? 'Quote Repost' : 'Reply'})...`);
 
@@ -725,8 +725,8 @@ async function run() {
           // In test mode, wait 15 seconds
           waitTimeSeconds = 15;
         } else {
-          // Randomize wait time between 2 minutes (120s) and 7 minutes (420s)
-          waitTimeSeconds = Math.floor(Math.random() * (420 - 120 + 1)) + 120;
+          // Randomize wait time between 2 minutes (120s) and 4 minutes (240s)
+          waitTimeSeconds = Math.floor(Math.random() * (240 - 120 + 1)) + 120;
         }
 
         console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);
