@@ -7,7 +7,9 @@
     "start": "bun run index.ts",
     "start:test": "bun run index.ts --test",
     "test-llm": "bun run test-llm.ts",
-    "wat": "bun run wat.ts"
+    "wat": "bun run wat.ts",
+    "bulk": "bun run bulk_send.ts",
+    "browser": "bun run browser_send.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

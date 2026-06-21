@@ -154,31 +154,59 @@ export async function generateTweet(topic: string): Promise<string> {
  * @param tweetText The text of the tweet to reply to.
  * @returns The generated reply string.
  */
+/**
+ * Performs a search on Google Web Search using Gemini's Google Search grounding.
+ * @param query The search query.
+ */
+export async function searchGoogleWithGemini(query: string): Promise<{ text: string; hasGoodInfo: boolean }> {
+  try {
+    const client = getGoogleClient();
+    const provider = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
+    const model = process.env.LLM_MODEL || getDefaultModel(provider);
+    const targetModel = model.includes('gemini') ? model : 'gemini-3.5-flash';
+
+    console.log(`      🔍 Performing default Google Search in Gemini with model: ${targetModel} for query: "${query}"`);
+
+    const response = await client.models.generateContent({
+      model: targetModel,
+      contents: `Search the web and provide detailed, up-to-date facts, context, or news about this topic/query: "${query}". Return a detailed factual summary.`,
+      config: {
+        temperature: 0.3,
+        tools: [{ googleSearch: {} }],
+      }
+    });
+
+    const text = response.text || '';
+    
+    // Extract candidates/groundingMetadata
+    const candidate = response.candidates?.[0];
+    const metadata = candidate?.groundingMetadata;
+    const hasChunks = !!(metadata && metadata.groundingChunks && metadata.groundingChunks.length > 0);
+    const hasQueries = !!(metadata && metadata.webSearchQueries && metadata.webSearchQueries.length > 0);
+    
+    // We have "good information" if we successfully retrieved search chunks and the response text is substantial
+    const hasGoodInfo = hasChunks && text.length > 100;
+    
+    console.log(`      Gemini Google Search details - Chunks found: ${hasChunks}, Queries performed: ${hasQueries}, Has good info: ${hasGoodInfo}`);
+    return { text, hasGoodInfo };
+  } catch (err: any) {
+    console.warn(`      ⚠️ Gemini Google Search failed:`, err.message || err);
+    return { text: '', hasGoodInfo: false };
+  }
+}
+
+/**
+ * Decides whether a tweet requires a web search, performs the search if needed,
+ * and generates a reply.
+ * @param tweetText The text of the tweet to reply to.
+ * @returns The generated reply string.
+ */
 export async function generateReplyWithSearch(tweetText: string): Promise<string> {
-  // Select a reply tone: good, bad, or straight
-  const replyTones = ['good', 'bad', 'straight'] as const;
-  const tone = replyTones[Math.floor(Math.random() * replyTones.length)]!;
-  console.log(`      Selected reply tone: ${tone.toUpperCase()}`);
-
-  let systemInstruction = REPLY_STRAIGHT_PROMPT;
-  if (tone === 'good') {
-    systemInstruction = REPLY_GOOD_PROMPT;
-  } else if (tone === 'bad') {
-    systemInstruction = REPLY_BAD_PROMPT;
-  }
-
-  // Check if Exa is configured
-  const exaKey = process.env.EXA_API_KEY;
-  if (!exaKey || exaKey === 'your_exa_api_key_here') {
-    console.log('   ⚠️ EXA_API_KEY is not configured. Skipping web search and replying directly.');
-    return generateText(
-      `Write a concise reply to this tweet: "${tweetText}"`,
-      systemInstruction
-    );
-  }
+  let hasGoodInfo = false;
+  let searchContext = '';
 
   try {
-    // 1. Ask OpenAI if we need to search the web
+    // 1. Analyze if search is needed
     console.log('      Analyzing tweet to determine if web search is needed...');
     const decisionPrompt =
       `Analyze the following tweet. If answering or replying to this tweet requires recent facts, news, references, ` +
@@ -192,59 +220,96 @@ export async function generateReplyWithSearch(tweetText: string): Promise<string
 
     if (needsSearch) {
       console.log('      🔍 Web search is needed. Generating search query...');
-      // 2. Ask OpenAI to generate a search query
       const queryPrompt =
         `Based on this tweet: "${tweetText}"\n\n` +
         `Generate a single, concise search query optimized for search engines to find the relevant context or facts. ` +
         `Do not include search operators like site: or quotes. Just the keywords.`;
 
       const searchQuery = await generateText(queryPrompt, 'Respond with only the search query keywords.');
-      console.log(`      🔎 Exa Search Query: "${searchQuery}"`);
+      console.log(`      🔎 Search Query: "${searchQuery}"`);
 
-      // 3. Perform Exa Search
-      const exa = getExa();
-      const searchResult = await exa.search(searchQuery, {
-        numResults: 3,
-        contents: {
-          highlights: true,
-        },
-      });
-
-      // 4. Extract highlights
-      let searchContext = '';
-      if (searchResult.results && searchResult.results.length > 0) {
-        searchContext = searchResult.results.map((res, i) => {
-          const highlightStr = res.highlights ? res.highlights.join(' ') : '';
-          return `[Result ${i + 1}] Title: ${res.title}\nURL: ${res.url}\nContext: ${highlightStr}\n`;
-        }).join('\n');
+      // Try Gemini Google Search first (default search in gemini)
+      try {
+        const geminiResult = await searchGoogleWithGemini(searchQuery);
+        if (geminiResult.hasGoodInfo) {
+          hasGoodInfo = true;
+          searchContext = geminiResult.text;
+          console.log(`      ✅ Good information obtained via Gemini Google Search.`);
+        } else {
+          console.log(`      ⚠️ Gemini Google Search did not return sufficient grounding information.`);
+          if (geminiResult.text) {
+            searchContext = geminiResult.text;
+          }
+        }
+      } catch (err: any) {
+        console.warn(`      ⚠️ Gemini Search error:`, err.message || err);
       }
 
-      if (searchContext) {
-        console.log('      ✅ Web search results fetched and injected into context.');
-        // Generate reply using the search context
-        const promptWithContext =
-          `Here is a tweet you need to reply to: "${tweetText}"\n\n` +
-          `We searched the web for relevant context and found the following information:\n` +
-          `${searchContext}\n` +
-          `Using this context to ensure factual accuracy, write a concise, conversational reply to the tweet.`;
+      // If Gemini search didn't yield good info, check Exa as backup
+      if (!hasGoodInfo) {
+        const exaKey = process.env.EXA_API_KEY;
+        if (exaKey && exaKey !== 'your_exa_api_key_here') {
+          try {
+            console.log('      🔍 Trying Exa Search as backup...');
+            const exa = getExa();
+            const searchResult = await exa.search(searchQuery, {
+              numResults: 3,
+              contents: { highlights: true },
+            });
 
-        return generateText(promptWithContext, systemInstruction);
-      } else {
-        console.log('      ⚠️ Web search returned no results. Falling back to direct reply.');
+            if (searchResult.results && searchResult.results.length > 0) {
+              const exaContext = searchResult.results.map((res, i) => {
+                const highlightStr = res.highlights ? res.highlights.join(' ') : '';
+                return `[Result ${i + 1}] Title: ${res.title}\nURL: ${res.url}\nContext: ${highlightStr}\n`;
+              }).join('\n');
+
+              if (exaContext.trim().length > 100) {
+                searchContext = exaContext;
+                hasGoodInfo = true;
+                console.log(`      ✅ Good information obtained via Exa Search.`);
+              }
+            }
+          } catch (exaErr: any) {
+            console.warn('      ⚠️ Exa search backup failed:', exaErr.message || exaErr);
+          }
+        }
       }
     } else {
-      console.log('      ⚡ No web search required. Replying directly.');
+      console.log('      ⚡ No web search required.');
     }
   } catch (error: any) {
-    console.warn('      ⚠️ Exa search failed or threw an error:', error.message || error);
-    console.log('      Falling back to direct reply...');
+    console.warn('      ⚠️ Search analysis failed or threw an error:', error.message || error);
   }
 
-  // Fallback direct reply
-  return generateText(
-    `Write a concise reply to this tweet: "${tweetText}"`,
-    systemInstruction
-  );
+  // 2. Select tone based on whether we have "good information"
+  let tone: 'good' | 'bad' | 'straight';
+  if (hasGoodInfo) {
+    // We have good information! We are allowed to make a harsh reply (bad)
+    // 70% chance harsh (bad), 30% chance straight
+    tone = Math.random() < 0.7 ? 'bad' : 'straight';
+  } else {
+    // No good information -> STRICTLY avoid harsh (bad) replies. Use straight or good.
+    tone = Math.random() < 0.5 ? 'straight' : 'good';
+  }
+  console.log(`      Selected reply tone: ${tone.toUpperCase()} (hasGoodInfo: ${hasGoodInfo})`);
+
+  let systemInstruction = REPLY_STRAIGHT_PROMPT;
+  if (tone === 'good') {
+    systemInstruction = REPLY_GOOD_PROMPT;
+  } else if (tone === 'bad') {
+    systemInstruction = REPLY_BAD_PROMPT;
+  }
+
+  // 3. Generate response using context if available
+  let promptWithContext = `Here is a tweet you need to reply to: "${tweetText}"\n\n`;
+  if (searchContext) {
+    promptWithContext += `We searched the web for relevant context and found the following information:\n${searchContext}\n\n`;
+    promptWithContext += `Using this context to ensure factual accuracy, write a concise, conversational reply to the tweet.`;
+  } else {
+    promptWithContext += `Write a concise reply to the tweet.`;
+  }
+
+  return generateText(promptWithContext, systemInstruction);
 }
 
 export interface NewsArticle {
