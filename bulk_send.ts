@@ -93,11 +93,23 @@ async function sendToPhone(browser: Browser, phone: string, messageText: string)
   const page = pages[0];
   if (!page) return 'failed';
 
+  console.log(`   🌐 Transitioning chat client-side to +${cleanPhone}...`);
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  } catch {
-    // timeout on goto is ok, we'll check for the textbox below
-    console.log(`   ⚠️ goto timeout, continuing to check page...`);
+    // Navigate without full page reload by using pushState + popstate
+    await page.evaluate((cleanPhone) => {
+      window.history.pushState(null, '', `/send?phone=${cleanPhone}`);
+      window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+    }, cleanPhone);
+    // Allow route transition to initiate
+    await delay(2000);
+  } catch (err: any) {
+    console.log(`   ⚠️ Client-side routing failed: ${err.message || err}. Falling back to full page reload...`);
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch {
+      // timeout on goto is ok, we'll check for the textbox below
+      console.log(`   ⚠️ goto timeout, continuing to check page...`);
+    }
   }
 
   // Wait up to 18s for message box OR "invalid number" indicator
@@ -122,9 +134,22 @@ async function sendToPhone(browser: Browser, phone: string, messageText: string)
     // Check "not on WhatsApp" error
     const notOnWa = await fp.evaluate(() => {
       const t = document.body?.textContent || '';
-      return t.includes('Phone number shared via url is invalid') ||
+      const hasError = t.includes('Phone number shared via url is invalid') ||
         t.includes('not registered on WhatsApp') ||
         t.includes('This phone number is not registered');
+
+      if (hasError) {
+        // Attempt to automatically dismiss the warning popup modal so it doesn't block subsequent actions
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+        const okButton = buttons.find(b => {
+          const text = (b.textContent || '').trim().toUpperCase();
+          return text === 'OK' || text === 'CLOSE' || text === 'DISMISS';
+        });
+        if (okButton) {
+          (okButton as HTMLElement).click();
+        }
+      }
+      return hasError;
     }).catch(() => false);
     if (notOnWa) return 'not_on_wa';
 

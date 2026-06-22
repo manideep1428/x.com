@@ -371,24 +371,101 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string): Pro
   }
   console.log(`      Generated quote thoughts:\n"${commentary}"`);
 
-  await page.waitForSelector('[data-testid="retweet"]', { timeout: 10000 });
-  await page.click('[data-testid="retweet"]');
+  await page.waitForSelector('[data-testid="retweet"], [data-testid="unretweet"]', { timeout: 10000 });
+  await page.click('[data-testid="retweet"], [data-testid="unretweet"]');
   await delay(1500);
 
-  await page.waitForSelector('[data-testid="QuoteTweet"]', { timeout: 5000 });
-  await page.click('[data-testid="QuoteTweet"]');
+  // Wait for the dropdown menu items
+  const quoteOptionSelector = '[role="menuitem"], [data-testid="QuoteTweet"], [data-testid="quote"]';
+  await page.waitForSelector(quoteOptionSelector, { timeout: 5000 });
+
+  // Click the quote option using evaluate to search by text/attribute
+  const clickedQuoteOption = await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll('[role="menuitem"], [data-testid="QuoteTweet"], [data-testid="quote"]'));
+    for (const item of items) {
+      const text = (item.textContent || '').trim().toLowerCase();
+      const testid = item.getAttribute('data-testid') || '';
+      if (
+        text.includes('quote') || 
+        testid === 'QuoteTweet' || 
+        testid === 'quote'
+      ) {
+        (item as HTMLElement).click();
+        return true;
+      }
+    }
+    return false;
+  });
+
+  if (!clickedQuoteOption) {
+    console.log('      ⚠️ Evaluate search for quote option failed. Attempting direct click selector fallback...');
+    try {
+      await page.click('[data-testid="QuoteTweet"]');
+    } catch {
+      await page.click('[data-testid="quote"]');
+    }
+  }
+
   await delay(3000);
 
-  // Click and write in composer
-  await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 5000 });
-  await page.click('[data-testid="tweetTextarea_0"]');
+  // Wait for the composer (textarea) inside the modal dialog
+  const textareaSelector = '[role="dialog"] [data-testid="tweetTextarea_0"], [data-testid="tweetTextarea_0"]';
+  await page.waitForSelector(textareaSelector, { timeout: 10000 });
+  
+  // Focus/Click the textarea, prioritizing the one in the modal dialog
+  await page.evaluate(() => {
+    const dialogTextarea = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') as HTMLElement;
+    if (dialogTextarea) {
+      dialogTextarea.click();
+      return;
+    }
+    const textareas = Array.from(document.querySelectorAll('[data-testid="tweetTextarea_0"]')) as HTMLElement[];
+    if (textareas.length > 0) {
+      textareas[textareas.length - 1]!.click();
+    }
+  });
+
   await delay(1000);
   await page.keyboard.type(commentary, { delay: 50 });
   await delay(2000);
 
-  // Post quote
-  await page.waitForSelector('[data-testid="tweetButton"]', { timeout: 5000 });
-  await page.click('[data-testid="tweetButton"]');
+  // Post quote by clicking the button, prioritizing the button inside the modal dialog
+  const submitClicked = await page.evaluate(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    const container = dialog || document;
+    
+    // Try data-testid="tweetButton"
+    const btn1 = container.querySelector('[data-testid="tweetButton"]') as HTMLElement;
+    if (btn1) {
+      btn1.click();
+      return true;
+    }
+    
+    // Try data-testid="tweetButtonInline"
+    const btn2 = container.querySelector('[data-testid="tweetButtonInline"]') as HTMLElement;
+    if (btn2) {
+      btn2.click();
+      return true;
+    }
+
+    // Try text match (Post or Tweet)
+    const buttons = Array.from(container.querySelectorAll('[role="button"], button')) as HTMLElement[];
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (text === 'post' || text === 'tweet') {
+        btn.click();
+        return true;
+      }
+    }
+    return false;
+  });
+
+  if (!submitClicked) {
+    console.log('      ⚠️ Evaluate search for post button failed. Attempting direct click selector fallback...');
+    await page.waitForSelector('[data-testid="tweetButton"]', { timeout: 5000 });
+    await page.click('[data-testid="tweetButton"]');
+  }
+
   await delay(5000);
   console.log('   ✅ Quote reposted successfully!');
   recordPostedText(commentary);
