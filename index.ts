@@ -514,6 +514,7 @@ async function run() {
         headless: true,
         executablePath: chromePath,
         userDataDir,
+        protocolTimeout: 240000, // 4 minutes timeout to prevent infinite hanging
         defaultViewport: {
           width: 1280,
           height: 800,
@@ -630,7 +631,9 @@ async function run() {
       }
 
       // --- Start Scheduling Loop ---
+      let iterationsWithCurrentBrowser = 0;
       while (true) {
+        iterationsWithCurrentBrowser++;
         const iterStr = isTestMode ? `${i} of 2` : `${i}`;
         console.log(`\n========================================`);
         console.log(`⏰ ITERATION [${iterStr}] - Timestamp: ${new Date().toLocaleTimeString()}`);
@@ -648,6 +651,7 @@ async function run() {
         // - 50% Reply (comment)
         const isQuote = Math.random() < 0.50;
         let success = false;
+        let shouldRelaunch = false;
 
         try {
           // Action: Interact with timeline tweet
@@ -706,8 +710,10 @@ async function run() {
           });
 
           if (filteredTweets.length < 5) {
-            console.log('      ⚠️ Too few tweets after filtering out own and interacted tweets. Skipping feed action in this iteration.');
-            continue;
+            throw {
+              name: 'SkipIteration',
+              message: 'Too few tweets after filtering out own and interacted tweets.'
+            };
           }
 
           let targetIndex = -1;
@@ -752,8 +758,10 @@ async function run() {
           }
 
           if (!selectedTweet) {
-            console.log('      ⚠️ No tech/AI related tweets found in the candidate range. Skipping feed action in this iteration.');
-            continue;
+            throw {
+              name: 'SkipIteration',
+              message: 'No tech/AI related tweets found in the candidate range.'
+            };
           }
 
           const tweetText = selectedTweet.text;
@@ -778,7 +786,12 @@ async function run() {
             success = await replyToTweet(page, tweetText, statusUrl);
           }
         } catch (err: any) {
-          console.error('   ❌ Error performing iteration action:', err.message || err);
+          if (err && err.name === 'SkipIteration') {
+            console.log(`   ⚠️ Skipping feed action in this iteration: ${err.message}`);
+          } else {
+            console.error('   ❌ Error performing iteration action:', err.message || err);
+            shouldRelaunch = true;
+          }
         }
 
         console.log(`📢 Iteration ${i} complete. Success status: ${success ? 'YES' : 'NO'}`);
@@ -802,6 +815,11 @@ async function run() {
         console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);
         await delay(waitTimeSeconds * 1000);
         i++;
+
+        if (shouldRelaunch || iterationsWithCurrentBrowser >= 10) {
+          console.log(`🔄 Restarting browser to keep session fresh and prevent resource leaks (iterations with current browser: ${iterationsWithCurrentBrowser})...`);
+          break;
+        }
       }
     } catch (error: any) {
       console.error('❌ Error in scheduler run:', error.message || error);
