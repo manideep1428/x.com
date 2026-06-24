@@ -172,8 +172,8 @@ async function scrollFeed(page: Page, targetCount: number): Promise<void> {
 async function postAINews(page: Page): Promise<boolean> {
   console.log('   🔥 Action: Creating a new post based on latest AI/tech news...');
 
-  const isHarsh = Math.random() < 0.70;
-  console.log(`      Tone selection: ${isHarsh ? 'HARSH (70% probability)' : 'NORMAL (30% probability)'}`);
+  const isHarsh = Math.random() < 0.10;
+  console.log(`      Tone selection: ${isHarsh ? 'HARSH (10% probability)' : 'NORMAL (90% probability)'}`);
 
   // Generate the tweet using Exa search and LLM, checking for AI similarity
   let tweetContent = '';
@@ -266,8 +266,8 @@ async function postAINews(page: Page): Promise<boolean> {
 }
 
 // Action: Reply to a tweet
-async function replyToTweet(page: Page, tweetText: string, statusUrl: string): Promise<boolean> {
-  console.log('   ✍️ Sub-Action: Replying to the selected tweet...');
+async function replyToTweet(page: Page, tweetText: string, statusUrl: string, isHarsh: boolean = false): Promise<boolean> {
+  console.log(`   ✍️ Sub-Action: Replying to the selected tweet... (Tone: ${isHarsh ? 'HARSH' : 'NORMAL'})`);
 
   // Fail-safe check: do not reply if the current tweet detail page is our own tweet
   if (myUsername) {
@@ -285,12 +285,43 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string): P
     }
   }
 
+  // Decide whether to reply to a comment on the post (10% chance)
+  const replyToCommentRoll = Math.random() < 0.10;
+  let targetTweetText = tweetText;
+  let replyToCommentIndex = -1;
+
+  if (replyToCommentRoll) {
+    console.log('      🎲 10% Roll: Attempting to reply to a comment on the post instead of the main tweet...');
+    // Wait for comments to load
+    await delay(3000);
+    const commentTweets = await page.evaluate(() => {
+      const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+      if (articles.length <= 1) return [];
+      // The first one is the main tweet, subsequent ones are comments
+      return articles.slice(1).map((el, index) => {
+        const textEl = el.querySelector('[data-testid="tweetText"]');
+        const text = textEl ? textEl.textContent || '' : '';
+        return { index: index + 1, text };
+      }).filter((c: any) => c.text.trim().length > 0);
+    });
+
+    if (commentTweets.length > 0) {
+      // Pick a random comment
+      const selectedComment = commentTweets[Math.floor(Math.random() * commentTweets.length)]!;
+      targetTweetText = selectedComment.text;
+      replyToCommentIndex = selectedComment.index;
+      console.log(`      Selected comment at page index ${replyToCommentIndex}: "${targetTweetText.substring(0, 80)}..."`);
+    } else {
+      console.log('      No comments found on the post. Falling back to replying to the main tweet.');
+    }
+  }
+
   // Generate the reply and check for AI similarity
   let replyContent = '';
   let attempts = 0;
   const maxAttempts = 5;
   while (attempts < maxAttempts) {
-    replyContent = await generateReplyWithSearch(tweetText);
+    replyContent = await generateReplyWithSearch(targetTweetText, isHarsh);
     const isDupOrSimilar = await isSimilarToRecentPosts(replyContent);
     if (!isDupOrSimilar) {
       break;
@@ -300,16 +331,94 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string): P
   }
   console.log(`      Generated reply:\n"${replyContent}"`);
 
-  // Interact with composer text area using fresh selectors
-  await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
-  await page.click('[data-testid="tweetTextarea_0"]');
+  if (replyToCommentIndex !== -1) {
+    const clickedReply = await page.evaluate((index) => {
+      const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+      const targetArticle = articles[index];
+      if (targetArticle) {
+        const replyBtn = targetArticle.querySelector('[data-testid="reply"]') as HTMLElement;
+        if (replyBtn) {
+          replyBtn.click();
+          return true;
+        }
+      }
+      return false;
+    }, replyToCommentIndex);
+
+    if (!clickedReply) {
+      console.log('      ⚠️ Failed to click reply button on the comment. Falling back to main tweet reply.');
+      await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
+      await page.click('[data-testid="tweetTextarea_0"]');
+    } else {
+      console.log('      Clicked reply button on the comment.');
+      await delay(2000);
+    }
+  } else {
+    // Normal flow: interact with the inline reply composer on the main page
+    await page.waitForSelector('[data-testid="tweetTextarea_0"]', { timeout: 10000 });
+    await page.click('[data-testid="tweetTextarea_0"]');
+  }
+
+  // Focus and type directly (handles both inline and modal dialog composers)
+  const composerSelector = '[role="dialog"] [data-testid="tweetTextarea_0"], [data-testid="tweetTextarea_0"]';
+  await page.waitForSelector(composerSelector, { timeout: 10000 });
+
+  await page.evaluate(() => {
+    const dialogTextarea = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') as HTMLElement;
+    if (dialogTextarea) {
+      dialogTextarea.click();
+      return;
+    }
+    const textareas = Array.from(document.querySelectorAll('[data-testid="tweetTextarea_0"]')) as HTMLElement[];
+    if (textareas.length > 0) {
+      textareas[textareas.length - 1]!.click();
+    }
+  });
+
   await delay(1000);
   await page.keyboard.type(replyContent, { delay: 50 });
   await delay(2000);
 
-  // Click submit
-  await page.waitForSelector('[data-testid="tweetButtonInline"]', { timeout: 5000 });
-  await page.click('[data-testid="tweetButtonInline"]');
+  // Click submit (handles both inline and modal dialog composers)
+  const submitClicked = await page.evaluate(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    const container = dialog || document;
+    
+    // Try data-testid="tweetButton"
+    const btn1 = container.querySelector('[data-testid="tweetButton"]') as HTMLElement;
+    if (btn1) {
+      btn1.click();
+      return true;
+    }
+    
+    // Try data-testid="tweetButtonInline"
+    const btn2 = container.querySelector('[data-testid="tweetButtonInline"]') as HTMLElement;
+    if (btn2) {
+      btn2.click();
+      return true;
+    }
+
+    // Try text match (Post or Tweet)
+    const buttons = Array.from(container.querySelectorAll('[role="button"], button')) as HTMLElement[];
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (text === 'post' || text === 'tweet') {
+        btn.click();
+        return true;
+      }
+    }
+    return false;
+  });
+
+  if (!submitClicked) {
+    console.log('      ⚠️ Evaluate search for post button failed. Attempting direct click selector fallback...');
+    try {
+      await page.click('[data-testid="tweetButton"]');
+    } catch {
+      await page.click('[data-testid="tweetButtonInline"]');
+    }
+  }
+
   await delay(5000);
   console.log('   ✅ Reply posted successfully!');
   recordPostedText(replyContent);
@@ -334,8 +443,8 @@ async function repostTweet(page: Page, statusUrl: string): Promise<boolean> {
 }
 
 // Action: Quote Repost (Repost with thoughts)
-async function quoteTweet(page: Page, tweetText: string, statusUrl: string): Promise<boolean> {
-  console.log('   💬 Sub-Action: Quote-Reposting the selected tweet...');
+async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHarsh: boolean = false): Promise<boolean> {
+  console.log(`   💬 Sub-Action: Quote-Reposting the selected tweet... (Tone: ${isHarsh ? 'HARSH' : 'NORMAL'})`);
 
   // Fail-safe check: do not quote-repost if the current tweet detail page is our own tweet
   if (myUsername) {
@@ -357,10 +466,15 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string): Pro
   let commentary = '';
   let attempts = 0;
   const maxAttempts = 5;
+  let systemInstruction = QUOTE_SYSTEM_PROMPT;
+  if (isHarsh) {
+    systemInstruction += "\n- CRITICAL: Make this comment a harsh, too much direct attack or roast, calling out the target post's ideas or author directly and bluntly.";
+  }
+
   while (attempts < maxAttempts) {
     commentary = await generateText(
       `Write a short comment quote-tweeting this: "${tweetText}"`,
-      QUOTE_SYSTEM_PROMPT
+      systemInstruction
     );
     const isDupOrSimilar = await isSimilarToRecentPosts(commentary);
     if (!isDupOrSimilar) {
@@ -589,7 +703,7 @@ async function run() {
 
             try {
               const cookies = await page.cookies();
-              const authTokenCookie = cookies.find(c => c.name === 'auth_token');
+              const authTokenCookie = cookies.find((c: any) => c.name === 'auth_token');
               if (authTokenCookie && authTokenCookie.value) {
                 console.log('💾 Saving new auth_token to .env...');
                 updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
@@ -610,7 +724,7 @@ async function run() {
 
         try {
           const cookies = await page.cookies();
-          const authTokenCookie = cookies.find(c => c.name === 'auth_token');
+          const authTokenCookie = cookies.find((c: any) => c.name === 'auth_token');
           if (authTokenCookie && authTokenCookie.value && process.env.TWITTER_AUTH_TOKEN !== authTokenCookie.value) {
             console.log('💾 Syncing auth_token to .env...');
             updateEnvFile('TWITTER_AUTH_TOKEN', authTokenCookie.value);
@@ -650,6 +764,7 @@ async function run() {
         // - 50% Quote Repost (repost with quote/thoughts)
         // - 50% Reply (comment)
         const isQuote = Math.random() < 0.50;
+        const isHarsh = Math.random() < 0.10; // 10% chance for a harsh direct attack
         let success = false;
         let shouldRelaunch = false;
 
@@ -672,7 +787,9 @@ async function run() {
               const statusLink = links.find((link) => link.href.includes('/status/'));
               const url = statusLink ? statusLink.href : '';
 
-              return { text, url };
+              const hasVideo = !!el.querySelector('video, [data-testid="videoPlayer"]');
+
+              return { text, url, hasVideo };
             }).filter((t) => t.url !== '');
           });
 
@@ -686,7 +803,7 @@ async function run() {
           }
 
           // Filter out our own tweets and previously interacted tweets from timeline feed
-          let filteredTweets = gatheredTweets.filter((t) => {
+          let filteredTweets = gatheredTweets.filter((t: any) => {
             // Check persistent history memory first
             if (hasInteractedWithUrl(t.url)) {
               console.log(`      Skipping previously interacted tweet: ${t.url}`);
@@ -717,7 +834,7 @@ async function run() {
           }
 
           let targetIndex = -1;
-          let selectedTweet: { text: string; url: string } | null = null;
+          let selectedTweet: { text: string; url: string; hasVideo: boolean } | null = null;
           let attempts = 0;
           const maxAttempts = 5;
 
@@ -748,6 +865,14 @@ async function run() {
             const isTech = await isTechRelated(candidateTweet.text);
 
             if (isTech) {
+              if (candidateTweet.hasVideo) {
+                const videoRoll = Math.random() < 0.50;
+                if (!videoRoll) {
+                  console.log(`      Video tweet found at index ${candidateIdx}, but 50% roll chose to SKIP.`);
+                  continue;
+                }
+                console.log(`      Video tweet found at index ${candidateIdx}, 50% roll chose to INTERACT.`);
+              }
               targetIndex = candidateIdx;
               selectedTweet = candidateTweet;
               console.log(`      ✅ Found tech/AI related tweet at index ${candidateIdx}!`);
@@ -781,9 +906,9 @@ async function run() {
           }
 
           if (isQuote) {
-            success = await quoteTweet(page, tweetText, statusUrl);
+            success = await quoteTweet(page, tweetText, statusUrl, isHarsh);
           } else {
-            success = await replyToTweet(page, tweetText, statusUrl);
+            success = await replyToTweet(page, tweetText, statusUrl, isHarsh);
           }
         } catch (err: any) {
           if (err && err.name === 'SkipIteration') {

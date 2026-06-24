@@ -3,6 +3,7 @@ node_modules/
 
 # Puppeteer/Browser User Data & Profiles
 user_data/
+user_data_bulk/
 user_data_whatsapp/
 .chrome/
 
@@ -54,4 +55,11 @@ Thumbs.db
 
 wat*.ts
 temp/
+
+contact.json
+
+failed*.json
+
+sent*.json
+
 

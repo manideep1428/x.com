@@ -71,7 +71,7 @@ export async function isSimilarToRecentPosts(candidate: string): Promise<boolean
     .map((post, idx) => `[Post ${idx + 1}] "${post.replace(/\n/g, ' ')}"`)
     .join('\n');
 
-  const prompt = `You are a content filtering system for a technology Twitter bot.
+  const prompt = `You are a content filtering system for an AI, ML, JavaScript, and full-stack development Twitter bot.
 Your job is to prevent the bot from posting tweets that are redundant, cover the exact same news story/topic/announcement, or sound too similar to what it has posted recently.
 
 Here is the numbered list of recently posted tweets (starting from most recent):

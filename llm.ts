@@ -201,7 +201,7 @@ export async function searchGoogleWithGemini(query: string): Promise<{ text: str
  * @param tweetText The text of the tweet to reply to.
  * @returns The generated reply string.
  */
-export async function generateReplyWithSearch(tweetText: string): Promise<string> {
+export async function generateReplyWithSearch(tweetText: string, isHarsh: boolean = false): Promise<string> {
   let hasGoodInfo = false;
   let searchContext = '';
 
@@ -281,23 +281,23 @@ export async function generateReplyWithSearch(tweetText: string): Promise<string
     console.warn('      ⚠️ Search analysis failed or threw an error:', error.message || error);
   }
 
-  // 2. Select tone based on whether we have "good information"
+  // 2. Select tone based on whether we have "good information" and the isHarsh flag
   let tone: 'good' | 'bad' | 'straight';
-  if (hasGoodInfo) {
-    // We have good information! We are allowed to make a harsh reply (bad)
-    // 70% chance harsh (bad), 30% chance straight
-    tone = Math.random() < 0.7 ? 'bad' : 'straight';
+  // Check if we forced harsh or if there's a 10% random chance for a harsh/bad tone
+  const shouldBeHarsh = isHarsh || Math.random() < 0.10;
+  if (shouldBeHarsh) {
+    tone = 'bad';
   } else {
-    // No good information -> STRICTLY avoid harsh (bad) replies. Use straight or good.
     tone = Math.random() < 0.5 ? 'straight' : 'good';
   }
-  console.log(`      Selected reply tone: ${tone.toUpperCase()} (hasGoodInfo: ${hasGoodInfo})`);
+  console.log(`      Selected reply tone: ${tone.toUpperCase()} (isHarsh/roll: ${shouldBeHarsh}, hasGoodInfo: ${hasGoodInfo})`);
 
   let systemInstruction = REPLY_STRAIGHT_PROMPT;
   if (tone === 'good') {
     systemInstruction = REPLY_GOOD_PROMPT;
   } else if (tone === 'bad') {
-    systemInstruction = REPLY_BAD_PROMPT;
+    // Incorporate instructions for direct attack / roast
+    systemInstruction = REPLY_BAD_PROMPT + "\n- CRITICAL: Make the reply a harsh, too much direct attack or roast, calling out the tweet author or content directly and bluntly.";
   }
 
   // 3. Generate response using context if available
@@ -325,24 +325,22 @@ export interface NewsArticle {
  */
 export async function generateTechTrendQuery(): Promise<string> {
   const categories = [
-    "semiconductor chips, GPU hardware engineering, CUDA, Blackwell, AMD, or TSMC fabrication",
-    "compiler optimizations, LLM inference engines, llama.cpp, vLLM, TensorRT, or WebAssembly AI runtime",
-    "databases, vector search, pgvector, Qdrant, Milvus, or database scaling architectures",
-    "agentic AI frameworks, LangChain, CrewAI, Autogen, or browser automation agents",
-    "systems programming languages, Rust, WebAssembly, Zig, or Go in modern backend infrastructure",
-    "local LLMs, edge computing, Ollama, apple silicon optimization, or on-device intelligence",
-    "frontend framework wars, Next.js, Vite, React Server Components, or build tooling updates",
-    "open-source AI models, Hugging Face trends, fine-tuning techniques, LoRA, or quantization breakthroughs",
-    "developer tools, GitHub Copilot alternatives, LSP protocols, or code generation models",
-    "cloud infrastructure scaling, Kubernetes, serverless compute, or edge caching for AI applications"
+    "latest AI research papers, deep learning breakthroughs, or LLM architecture innovations",
+    "agentic AI frameworks, AI agent developer tools, or autonomous research agents",
+    "open-source LLMs, fine-tuning techniques, LoRA, or RAG systems",
+    "JavaScript, TypeScript, Node.js, and modern full-stack web framework updates",
+    "Next.js, React, Vite, React Server Components, and frontend/full-stack development trends",
+    "full stack developer roles, hiring trends, portfolio advice, and web engineering best practices",
+    "LLM inference optimization, local AI running in Javascript environments, or WebGPU AI runtimes",
+    "GitHub Copilot, coding assistants, and AI-driven full-stack development tools"
   ];
   
   const selectedCategory = categories[Math.floor(Math.random() * categories.length)];
   
-  const prompt = `Generate a single, highly specific search query to find the latest trending developments, news articles, blog posts, or research updates in this tech category: "${selectedCategory}".
+  const prompt = `Generate a single, highly specific search query to find the latest trending developments, news articles, blog posts, or research updates in this category: "${selectedCategory}".
 The query should be optimized for a search engine to return the most interesting developer-centric news or announcements from the past 48 hours.
 Do not use search operators (like AND, OR, site:). Return ONLY the query keywords.
-Example: "nvidia blackwell gpu benchmarks performance" or "vllm inference optimization llama 3" or "rust webassembly compiler performance updates".
+Example: "nextjs framework performance update" or "deep learning scaling law paper" or "full stack developer job market hiring".
 Return only the query text.`;
 
   try {
@@ -498,7 +496,9 @@ export async function generateTweetFromNews(
   options?: { isHarsh?: boolean }
 ): Promise<{ text: string; imageUrls?: string[] }> {
   const isHarsh = options?.isHarsh ?? false;
-  const systemInstruction = isHarsh ? HARSH_TWEET_SYSTEM_PROMPT : TWEET_SYSTEM_PROMPT;
+  let systemInstruction = isHarsh 
+    ? (HARSH_TWEET_SYSTEM_PROMPT + "\n- CRITICAL: Make this a harsh, too much direct attack or roast, calling out trends, companies, or people directly and bluntly.") 
+    : TWEET_SYSTEM_PROMPT;
   
   const news = await fetchLatestAINews();
   
@@ -617,11 +617,11 @@ Do not include links, write the post directly.`;
 export async function isTechRelated(text: string): Promise<boolean> {
   if (!text || !text.trim()) return false;
   
-  const prompt = `Analyze the following tweet text and determine if it is related to technology, software development, coding, artificial intelligence (AI), machine learning (ML), microchips/hardware (e.g. GPUs, CPUs, semiconductor manufacturing, NVIDIA, AMD, TSMC, Intel), tech companies (e.g., OpenAI, Google, Microsoft, Meta, Apple, tech startups), or general engineering and technology topics.
+  const prompt = `Analyze the following tweet text and determine if it is related strictly to artificial intelligence (AI), machine learning (ML), research on AI/ML, JavaScript programming, or full-stack web development / engineering roles and technologies.
   
-Tweet text: "${text}"
+  Tweet text: "${text}"
 
-Respond with ONLY "YES" if the tweet is related to tech/AI, and ONLY "NO" if it is about general topics, politics, sports, general news, lifestyle, personal anecdotes without tech context, or other unrelated topics. Do not explain your reasoning.`;
+  Respond with ONLY "YES" if the tweet is related to AI, ML, AI/ML research, JavaScript, or full-stack development. Respond with ONLY "NO" if it is about other tech topics (like general hardware, chips, databases, cloud scaling, rust, python backend, other programming languages unless related to full stack/JS), or general non-tech topics. Do not explain your reasoning.`;
 
   try {
     const response = await generateText(prompt, "Respond with only YES or NO.");
@@ -631,4 +631,3 @@ Respond with ONLY "YES" if the tweet is related to tech/AI, and ONLY "NO" if it 
     return false;
   }
 }
-
