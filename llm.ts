@@ -44,7 +44,6 @@ function getGoogleClient(): GoogleGenAI {
       );
     }
     googleClient = new GoogleGenAI({
-      vertexai: true,
       apiKey: apiKey
     });
   }
@@ -134,6 +133,30 @@ export async function generateText(prompt: string, systemInstruction?: string): 
     }
   } catch (error: any) {
     console.error(`❌ Error generating text with ${provider}:`, error.message || error);
+    const isTestMode = process.argv.includes('--test') || process.argv.includes('--dry-run');
+    if (isTestMode) {
+      console.warn(`⚠️ LLM generation failed, using mock response in test mode.`);
+      const lowerPrompt = prompt.toLowerCase();
+      if (lowerPrompt.includes('recently posted') || lowerPrompt.includes('similarity') || lowerPrompt.includes('redundant')) {
+        return 'NO';
+      }
+      if (lowerPrompt.includes('tech and ai/ml') || lowerPrompt.includes('related strictly to artificial intelligence') || lowerPrompt.includes('strictly related to tech')) {
+        return 'YES';
+      }
+      if (lowerPrompt.includes('requires recent facts') || lowerPrompt.includes('search is needed')) {
+        return 'NO';
+      }
+      if (lowerPrompt.includes('search query')) {
+        return 'latest LLM benchmarks';
+      }
+      if (lowerPrompt.includes('reply to the tweet') || lowerPrompt.includes('write a concise reply')) {
+        return 'mid tier wrapper app, real engineering is building local-first models bro.';
+      }
+      if (lowerPrompt.includes('quote-tweeting') || lowerPrompt.includes('quote-repost')) {
+        return 'bruh another wrapper startup raising $50m for an api call. lmao absolute hype train.';
+      }
+      return 'AI scaling is hitting physical limits but VC money keeps flowing to wrapper apps. lmao.';
+    }
     throw error;
   }
 }
@@ -328,19 +351,18 @@ export async function generateTechTrendQuery(): Promise<string> {
     "latest AI research papers, deep learning breakthroughs, or LLM architecture innovations",
     "agentic AI frameworks, AI agent developer tools, or autonomous research agents",
     "open-source LLMs, fine-tuning techniques, LoRA, or RAG systems",
-    "JavaScript, TypeScript, Node.js, and modern full-stack web framework updates",
-    "Next.js, React, Vite, React Server Components, and frontend/full-stack development trends",
-    "full stack developer roles, hiring trends, portfolio advice, and web engineering best practices",
     "LLM inference optimization, local AI running in Javascript environments, or WebGPU AI runtimes",
-    "GitHub Copilot, coding assistants, and AI-driven full-stack development tools"
+    "GitHub Copilot, coding assistants, and AI-driven full-stack development tools",
+    "machine learning breakthroughs, AI safety, or artificial neural networks developments",
+    "generative AI model releases, frontier LLM evaluations, or custom AI hardware updates"
   ];
   
   const selectedCategory = categories[Math.floor(Math.random() * categories.length)];
   
   const prompt = `Generate a single, highly specific search query to find the latest trending developments, news articles, blog posts, or research updates in this category: "${selectedCategory}".
-The query should be optimized for a search engine to return the most interesting developer-centric news or announcements from the past 48 hours.
-Do not use search operators (like AND, OR, site:). Return ONLY the query keywords.
-Example: "nextjs framework performance update" or "deep learning scaling law paper" or "full stack developer job market hiring".
+The query should be optimized for a search engine to return the most interesting AI/Tech-centric news or announcements from the past 48 hours.
+Do not use search operators (like AND, OR, site:). Absolutely DO NOT return anything related to games or gaming. Return ONLY the query keywords.
+Example: "deep learning scaling law paper" or "agentic ai framework release" or "new language model reasoning benchmark".
 Return only the query text.`;
 
   try {
@@ -617,11 +639,12 @@ Do not include links, write the post directly.`;
 export async function isTechRelated(text: string): Promise<boolean> {
   if (!text || !text.trim()) return false;
   
-  const prompt = `Analyze the following tweet text and determine if it is related strictly to artificial intelligence (AI), machine learning (ML), research on AI/ML, JavaScript programming, or full-stack web development / engineering roles and technologies.
+  const prompt = `Analyze the following tweet text and determine if it is strictly related to tech and AI/ML (artificial intelligence, machine learning, deep learning, software engineering, developer tools, AI startup or enterprise news).
   
   Tweet text: "${text}"
 
-  Respond with ONLY "YES" if the tweet is related to AI, ML, AI/ML research, JavaScript, or full-stack development. Respond with ONLY "NO" if it is about other tech topics (like general hardware, chips, databases, cloud scaling, rust, python backend, other programming languages unless related to full stack/JS), or general non-tech topics. Do not explain your reasoning.`;
+  Respond with ONLY "YES" if the tweet is strictly about tech and AI/ML.
+  Respond with ONLY "NO" if the tweet is about games, gaming, consoles, entertainment, politics, sports, general non-tech topics, or any other topic. Do not explain your reasoning.`;
 
   try {
     const response = await generateText(prompt, "Respond with only YES or NO.");

@@ -1,6 +1,7 @@
 import puppeteer, { Page } from 'puppeteer';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as readline from 'readline';
 import { generateText, generateReplyWithSearch, generateTweetFromNews, isTechRelated } from './llm';
 import { QUOTE_SYSTEM_PROMPT } from './prompt';
 import { isSimilarToRecentPosts, recordPostedText, hasInteractedWithUrl, recordInteractedUrl, getRecentPostedTexts } from './memory';
@@ -84,6 +85,71 @@ function updateEnvFile(key: string, value: string): void {
   } catch (err: any) {
     console.error(`⚠️ Error writing to .env:`, err.message || err);
   }
+}
+
+// Helper to request human review in console before posting
+async function askHumanReview(type: string, content: string, target?: { text: string, url: string }): Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return new Promise((resolve) => {
+    console.log(`\n==================================================`);
+    console.log(`🚨 HUMAN REVIEW REQUIRED [${type.toUpperCase()}]`);
+    console.log(`==================================================`);
+    if (target) {
+      console.log(`🔗 Target URL: ${target.url}`);
+      console.log(`📝 Target Text: "${target.text.substring(0, 150)}${target.text.length > 150 ? '...' : ''}"`);
+      console.log(`--------------------------------------------------`);
+    }
+    console.log(`Proposed Post:\n\x1b[36m"${content}"\x1b[0m`);
+    console.log(`==================================================`);
+    
+    rl.question('Approve and post? (y/n): ', (answer) => {
+      rl.close();
+      const approved = answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes';
+      resolve(approved);
+    });
+  });
+}
+
+// Helper to choose a tweet from the feed
+async function askTweetSelection(candidates: { text: string; url: string; hasVideo: boolean }[]): Promise<number> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return new Promise((resolve) => {
+    console.log(`\n==================================================`);
+    console.log(`📢 SELECT A TWEET FROM THE FEED TO INTERACT WITH`);
+    console.log(`==================================================`);
+    candidates.forEach((cand, idx) => {
+      let author = 'Unknown';
+      try {
+        const urlObj = new URL(cand.url);
+        const pathSegments = urlObj.pathname.split('/').filter(Boolean);
+        author = pathSegments[0] ? `@${pathSegments[0]}` : 'Unknown';
+      } catch {}
+      const cleanText = cand.text.trim().replace(/\n/g, ' ');
+      const preview = cleanText.substring(0, 100) + (cleanText.length > 100 ? '...' : '');
+      console.log(`[${idx + 1}] ${author}: "${preview}" (Video: ${cand.hasVideo ? 'YES' : 'NO'})`);
+    });
+    console.log(`[0] Skip this iteration`);
+    console.log(`==================================================`);
+
+    rl.question('Choose a tweet index (0 to skip): ', (answer) => {
+      rl.close();
+      const num = parseInt(answer.trim(), 10);
+      if (isNaN(num) || num < 0 || num > candidates.length) {
+        console.log('   ⚠️ Invalid selection, defaulting to skip (0).');
+        resolve(0);
+      } else {
+        resolve(num);
+      }
+    });
+  });
 }
 
 // Function to check if logged in
@@ -194,6 +260,12 @@ async function postAINews(page: Page): Promise<boolean> {
     attempts++;
   }
   console.log(`      Generated tweet content (length: ${tweetContent.length}):\n"${tweetContent}"`);
+
+  const approved = await askHumanReview('New Post (AI News)', tweetContent);
+  if (!approved) {
+    console.log('   ❌ Post rejected by human review.');
+    return false;
+  }
 
   let tempImagePath: string | null = null;
   if (imageUrls && imageUrls.length > 0) {
@@ -330,6 +402,12 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string, is
     attempts++;
   }
   console.log(`      Generated reply:\n"${replyContent}"`);
+
+  const approved = await askHumanReview('Reply', replyContent, { text: targetTweetText, url: statusUrl });
+  if (!approved) {
+    console.log('   ❌ Reply rejected by human review.');
+    return false;
+  }
 
   if (replyToCommentIndex !== -1) {
     const clickedReply = await page.evaluate((index) => {
@@ -484,6 +562,12 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
     attempts++;
   }
   console.log(`      Generated quote thoughts:\n"${commentary}"`);
+
+  const approved = await askHumanReview('Quote Repost', commentary, { text: tweetText, url: statusUrl });
+  if (!approved) {
+    console.log('   ❌ Quote repost rejected by human review.');
+    return false;
+  }
 
   await page.waitForSelector('[data-testid="retweet"], [data-testid="unretweet"]', { timeout: 10000 });
   await page.click('[data-testid="retweet"], [data-testid="unretweet"]');
@@ -761,9 +845,9 @@ async function run() {
         }
 
         // Roll a random action:
-        // - 50% Quote Repost (repost with quote/thoughts)
-        // - 50% Reply (comment)
-        const isQuote = Math.random() < 0.50;
+        // - 60% Quote Repost (repost with quote/thoughts)
+        // - 40% Reply (comment)
+        const isQuote = Math.random() < 0.60;
         const isHarsh = Math.random() < 0.10; // 10% chance for a harsh direct attack
         let success = false;
         let shouldRelaunch = false;
@@ -833,66 +917,44 @@ async function run() {
             };
           }
 
-          let targetIndex = -1;
-          let selectedTweet: { text: string; url: string; hasVideo: boolean } | null = null;
-          let attempts = 0;
-          const maxAttempts = 5;
-
-          // Shuffle indices between 5 and clamp(25, filteredTweets.length - 1) to search for a tech tweet
-          const startIndex = Math.min(5, filteredTweets.length - 1);
-          const endIndex = Math.min(25, filteredTweets.length - 1);
-
-          const candidateIndices: number[] = [];
-          for (let idx = startIndex; idx <= endIndex; idx++) {
-            candidateIndices.push(idx);
-          }
-          // Shuffle
-          for (let j = candidateIndices.length - 1; j > 0; j--) {
-            const k = Math.floor(Math.random() * (j + 1));
-            [candidateIndices[j], candidateIndices[k]] = [candidateIndices[k]!, candidateIndices[j]!];
-          }
-
-          console.log(`      Scanning candidates for a tech/AI related tweet...`);
-          for (const candidateIdx of candidateIndices) {
-            if (attempts >= maxAttempts) {
-              console.log(`      Reached max attempts (${maxAttempts}) checking for tech/AI tweets.`);
-              break;
-            }
-
-            const candidateTweet = filteredTweets[candidateIdx]!;
-            attempts++;
-            console.log(`      [Attempt ${attempts}] Checking candidate at index ${candidateIdx}...`);
+          // Scan the filtered tweets for tech/AI related tweets
+          const techCandidates: typeof filteredTweets = [];
+          console.log(`      Scanning feed for tech/AI related tweets...`);
+          // We can check up to the first 25 tweets on the feed
+          const maxCheck = Math.min(25, filteredTweets.length);
+          for (let idx = 0; idx < maxCheck; idx++) {
+            const candidateTweet = filteredTweets[idx]!;
             const isTech = await isTechRelated(candidateTweet.text);
-
             if (isTech) {
-              if (candidateTweet.hasVideo) {
-                const videoRoll = Math.random() < 0.50;
-                if (!videoRoll) {
-                  console.log(`      Video tweet found at index ${candidateIdx}, but 50% roll chose to SKIP.`);
-                  continue;
-                }
-                console.log(`      Video tweet found at index ${candidateIdx}, 50% roll chose to INTERACT.`);
-              }
-              targetIndex = candidateIdx;
-              selectedTweet = candidateTweet;
-              console.log(`      ✅ Found tech/AI related tweet at index ${candidateIdx}!`);
+              techCandidates.push(candidateTweet);
+            }
+            // Limit checking to not overload LLM check calls, say max 8 candidates
+            if (techCandidates.length >= 8) {
               break;
-            } else {
-              console.log(`      ❌ Candidate at index ${candidateIdx} is not tech/AI related.`);
             }
           }
 
-          if (!selectedTweet) {
+          if (techCandidates.length === 0) {
             throw {
               name: 'SkipIteration',
-              message: 'No tech/AI related tweets found in the candidate range.'
+              message: 'No tech/AI related tweets found in the feed.'
             };
           }
 
+          // Let the human choose from the candidates
+          const selection = await askTweetSelection(techCandidates);
+          if (selection === 0) {
+            throw {
+              name: 'SkipIteration',
+              message: 'User skipped tweet selection.'
+            };
+          }
+
+          const selectedTweet = techCandidates[selection - 1]!;
           const tweetText = selectedTweet.text;
           const statusUrl = selectedTweet.url;
 
-          console.log(`      Selected tweet at index ${targetIndex}...`);
+          console.log(`      Selected tweet: ${statusUrl}`);
           console.log(`      Found tweet content: "${tweetText.substring(0, 80).replace(/\n/g, ' ')}..."`);
           console.log(`      Navigating to tweet detail page: ${statusUrl}`);
 
