@@ -1,40 +1,11 @@
-import OpenAI from 'openai';
 import Exa from 'exa-js';
 import { GoogleGenAI } from '@google/genai';
-import { TWEET_SYSTEM_PROMPT, HARSH_TWEET_SYSTEM_PROMPT, REPLY_GOOD_PROMPT, REPLY_BAD_PROMPT, REPLY_STRAIGHT_PROMPT } from './prompt';
+import { TWEET_SYSTEM_PROMPT, HARSH_TWEET_SYSTEM_PROMPT, REPLY_GOOD_PROMPT, REPLY_BAD_PROMPT, REPLY_STRAIGHT_PROMPT, SUPER_HARSH_REPLY_PROMPT, DOUBT_CLARIFYING_REPLY_PROMPT, RANDOM_REPLY_PROMPT } from './prompt';
 
-let openaiClients: Record<string, OpenAI> = {};
 let googleClient: GoogleGenAI | null = null;
 let exaClient: Exa | null = null;
 
-// Helper to get cached OpenAI-compatible client for a given provider
-function getOpenAIClient(provider: string): OpenAI {
-  if (!openaiClients[provider]) {
-    let apiKey: string | undefined;
-    let baseURL: string | undefined;
-
-    if (provider === 'deepseek') {
-      apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
-      baseURL = "https://api.deepseek.com";
-    } else if (provider === 'groq') {
-      apiKey = process.env.GROQ_API_KEY;
-      baseURL = "https://api.groq.com/openai/v1";
-    } else {
-      // default: openai
-      apiKey = process.env.OPENAI_API_KEY;
-    }
-
-    if (!apiKey) {
-      throw new Error(
-        `Missing API key for provider "${provider}". Please define it in your .env file (e.g. ${provider.toUpperCase()}_API_KEY or OPENAI_API_KEY).`
-      );
-    }
-    openaiClients[provider] = new OpenAI({ apiKey, baseURL });
-  }
-  return openaiClients[provider]!;
-}
-
-// Helper to get cached Google GenAI / Vertex AI client
+// Helper to get cached Google GenAI client
 function getGoogleClient(): GoogleGenAI {
   if (!googleClient) {
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -43,27 +14,21 @@ function getGoogleClient(): GoogleGenAI {
         'Missing Gemini API key. Please define GEMINI_API_KEY or GOOGLE_API_KEY in your .env file.'
       );
     }
+    // Initialize without vertexai: true to default to standard Gemini API endpoint
     googleClient = new GoogleGenAI({
-      apiKey: apiKey
+      apiKey: apiKey,
+      vertexai: true
     });
   }
   return googleClient;
 }
 
-// Helper to get default model for a given provider
-function getDefaultModel(provider: string): string {
-  switch (provider) {
-    case 'openai':
-      return 'gpt-4o-mini';
-    case 'groq':
-      return 'llama-3.3-70b-versatile';
-    case 'vertexai':
-    case 'gemini':
-      return 'gemini-3.5-flash';
-    case 'deepseek':
-    default:
-      return 'deepseek-chat';
+// Helper to get default model
+function getDefaultModel(provider?: string): string {
+  if (provider === 'gemini') {
+    return 'gemini-3.5-flash';
   }
+  return 'gemini-3.5-flash';
 }
 
 // Helper to get the Exa client instance lazily
@@ -87,50 +52,31 @@ function getExa(): Exa {
  * @returns The generated string.
  */
 export async function generateText(prompt: string, systemInstruction?: string): Promise<string> {
-  const provider = (process.env.LLM_PROVIDER || 'openai').toLowerCase();
-  const model = process.env.LLM_MODEL || getDefaultModel(provider);
+  const provider = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
+  const model = process.env.LLM_MODEL || getDefaultModel();
 
   console.log(`🤖 generating text with provider: ${provider}, model: ${model}`);
 
   try {
-    if (provider === 'vertexai' || provider === 'gemini') {
-      const client = getGoogleClient();
+    const client = getGoogleClient();
 
-      const contents = systemInstruction
-        ? `${systemInstruction}\n\nUser: ${prompt}`
-        : prompt;
+    const contents = systemInstruction
+      ? `${systemInstruction}\n\nUser: ${prompt}`
+      : prompt;
 
-      const response = await client.models.generateContent({
-        model: model,
-        contents: contents,
-        config: {
-          temperature: 0.7,
-        }
-      });
-
-      const text = response.text;
-      if (!text) {
-        throw new Error('Vertex AI / Gemini returned an empty response.');
-      }
-      return text.trim();
-    } else {
-      // OpenAI, DeepSeek, or Groq
-      const client = getOpenAIClient(provider);
-      const response = await client.chat.completions.create({
-        model: model,
-        messages: [
-          ...(systemInstruction ? [{ role: 'system' as const, content: systemInstruction }] : []),
-          { role: 'user' as const, content: prompt },
-        ],
+    const response = await client.models.generateContent({
+      model: model,
+      contents: contents,
+      config: {
         temperature: 0.7,
-      });
-
-      const content = response.choices[0]?.message?.content;
-      if (!content) {
-        throw new Error(`${provider} returned an empty response.`);
       }
-      return content.trim();
+    });
+
+    const text = response.text;
+    if (!text) {
+      throw new Error('Gemini returned an empty response.');
     }
+    return text.trim();
   } catch (error: any) {
     console.error(`❌ Error generating text with ${provider}:`, error.message || error);
     const isTestMode = process.argv.includes('--test') || process.argv.includes('--dry-run');
@@ -185,7 +131,7 @@ export async function searchGoogleWithGemini(query: string): Promise<{ text: str
   try {
     const client = getGoogleClient();
     const provider = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
-    const model = process.env.LLM_MODEL || getDefaultModel(provider);
+    const model = process.env.LLM_MODEL || getDefaultModel();
     const targetModel = model.includes('gemini') ? model : 'gemini-3.5-flash';
 
     console.log(`      🔍 Performing default Google Search in Gemini with model: ${targetModel} for query: "${query}"`);
@@ -200,16 +146,16 @@ export async function searchGoogleWithGemini(query: string): Promise<{ text: str
     });
 
     const text = response.text || '';
-    
+
     // Extract candidates/groundingMetadata
     const candidate = response.candidates?.[0];
     const metadata = candidate?.groundingMetadata;
     const hasChunks = !!(metadata && metadata.groundingChunks && metadata.groundingChunks.length > 0);
     const hasQueries = !!(metadata && metadata.webSearchQueries && metadata.webSearchQueries.length > 0);
-    
+
     // We have "good information" if we successfully retrieved search chunks and the response text is substantial
     const hasGoodInfo = hasChunks && text.length > 100;
-    
+
     console.log(`      Gemini Google Search details - Chunks found: ${hasChunks}, Queries performed: ${hasQueries}, Has good info: ${hasGoodInfo}`);
     return { text, hasGoodInfo };
   } catch (err: any) {
@@ -224,28 +170,33 @@ export async function searchGoogleWithGemini(query: string): Promise<{ text: str
  * @param tweetText The text of the tweet to reply to.
  * @returns The generated reply string.
  */
-export async function generateReplyWithSearch(tweetText: string, isHarsh: boolean = false): Promise<string> {
+export async function generateReplyWithSearch(tweetText: string, tone: string): Promise<string> {
   let hasGoodInfo = false;
   let searchContext = '';
 
   try {
-    // 1. Analyze if search is needed
-    console.log('      Analyzing tweet to determine if web search is needed...');
-    const decisionPrompt =
-      `Analyze the following tweet. If answering or replying to this tweet requires recent facts, news, references, ` +
-      `or external information that an LLM might not know (e.g. current events, sports scores, release dates, factual queries), ` +
-      `respond with 'YES'. Otherwise, if it is a general opinion, joke, personal thought, or simple greeting, respond with 'NO'.\n\n` +
-      `Tweet: "${tweetText}"\n\n` +
-      `Decision (YES/NO):`;
+    // 1. Analyze if search is needed (forced for super_harsh and doubt_clarifying)
+    const forcedSearch = tone === 'super_harsh' || tone === 'doubt_clarifying';
+    let needsSearch = forcedSearch;
 
-    const decisionResponse = await generateText(decisionPrompt, 'Respond only with YES or NO.');
-    const needsSearch = decisionResponse.toUpperCase().includes('YES');
+    if (!forcedSearch) {
+      console.log('      Analyzing tweet to determine if web search is needed...');
+      const decisionPrompt =
+        `Analyze the following tweet. If answering or replying to this tweet requires recent facts, news, references, ` +
+        `or external information that an LLM might not know (e.g. current events, sports scores, release dates, factual queries), ` +
+        `respond with 'YES'. Otherwise, if it is a general opinion, joke, personal thought, or simple greeting, respond with 'NO'.\n\n` +
+        `Tweet: "${tweetText}"\n\n` +
+        `Decision (YES/NO):`;
+
+      const decisionResponse = await generateText(decisionPrompt, 'Respond only with YES or NO.');
+      needsSearch = decisionResponse.toUpperCase().includes('YES');
+    }
 
     if (needsSearch) {
-      console.log('      🔍 Web search is needed. Generating search query...');
+      console.log(`      🔍 Web search is required (Tone: ${tone}). Generating search query...`);
       const queryPrompt =
         `Based on this tweet: "${tweetText}"\n\n` +
-        `Generate a single, concise search query optimized for search engines to find the relevant context or facts. ` +
+        `Generate a single, concise search query optimized for search engines to find the relevant context, dates, times, or facts. ` +
         `Do not include search operators like site: or quotes. Just the keywords.`;
 
       const searchQuery = await generateText(queryPrompt, 'Respond with only the search query keywords.');
@@ -304,30 +255,29 @@ export async function generateReplyWithSearch(tweetText: string, isHarsh: boolea
     console.warn('      ⚠️ Search analysis failed or threw an error:', error.message || error);
   }
 
-  // 2. Select tone based on whether we have "good information" and the isHarsh flag
-  let tone: 'good' | 'bad' | 'straight';
-  // Check if we forced harsh or if there's a 10% random chance for a harsh/bad tone
-  const shouldBeHarsh = isHarsh || Math.random() < 0.10;
-  if (shouldBeHarsh) {
-    tone = 'bad';
-  } else {
-    tone = Math.random() < 0.5 ? 'straight' : 'good';
-  }
-  console.log(`      Selected reply tone: ${tone.toUpperCase()} (isHarsh/roll: ${shouldBeHarsh}, hasGoodInfo: ${hasGoodInfo})`);
+  // 2. Select tone based on the tone argument
+  console.log(`      Selected reply tone: ${tone.toUpperCase()}`);
 
   let systemInstruction = REPLY_STRAIGHT_PROMPT;
-  if (tone === 'good') {
+  if (tone === 'super_harsh') {
+    systemInstruction = SUPER_HARSH_REPLY_PROMPT;
+  } else if (tone === 'doubt_clarifying') {
+    systemInstruction = DOUBT_CLARIFYING_REPLY_PROMPT;
+  } else if (tone === 'good') {
     systemInstruction = REPLY_GOOD_PROMPT;
-  } else if (tone === 'bad') {
-    // Incorporate instructions for direct attack / roast
-    systemInstruction = REPLY_BAD_PROMPT + "\n- CRITICAL: Make the reply a harsh, too much direct attack or roast, calling out the tweet author or content directly and bluntly.";
+  } else {
+    systemInstruction = RANDOM_REPLY_PROMPT;
   }
 
   // 3. Generate response using context if available
   let promptWithContext = `Here is a tweet you need to reply to: "${tweetText}"\n\n`;
   if (searchContext) {
     promptWithContext += `We searched the web for relevant context and found the following information:\n${searchContext}\n\n`;
-    promptWithContext += `Using this context to ensure factual accuracy, write a concise, conversational reply to the tweet.`;
+    if (tone === 'super_harsh' || tone === 'doubt_clarifying') {
+      promptWithContext += `CRITICAL: You must cross-reference and verify the dates, times, and facts in the search context. Only write your response if the facts are 100% confirmed by the search context. If the search context does not confirm the details or is ambiguous, do not make unverified claims. Make sure you are 100% accurate.`;
+    } else {
+      promptWithContext += `Using this context to ensure factual accuracy, write a concise, conversational reply to the tweet.`;
+    }
   } else {
     promptWithContext += `Write a concise reply to the tweet.`;
   }
@@ -352,13 +302,13 @@ export async function generateTechTrendQuery(): Promise<string> {
     "agentic AI frameworks, AI agent developer tools, or autonomous research agents",
     "open-source LLMs, fine-tuning techniques, LoRA, or RAG systems",
     "LLM inference optimization, local AI running in Javascript environments, or WebGPU AI runtimes",
-    "GitHub Copilot, coding assistants, and AI-driven full-stack development tools",
-    "machine learning breakthroughs, AI safety, or artificial neural networks developments",
-    "generative AI model releases, frontier LLM evaluations, or custom AI hardware updates"
+    "new AI research papers published on arXiv, NeurIPS, ICML, or CVPR",
+    "programming languages for AI, CUDA programming, Python machine learning libraries, or PyTorch updates",
+    "frontier AI models, LLM evaluations, or AI safety research papers"
   ];
-  
+
   const selectedCategory = categories[Math.floor(Math.random() * categories.length)];
-  
+
   const prompt = `Generate a single, highly specific search query to find the latest trending developments, news articles, blog posts, or research updates in this category: "${selectedCategory}".
 The query should be optimized for a search engine to return the most interesting AI/Tech-centric news or announcements from the past 48 hours.
 Do not use search operators (like AND, OR, site:). Absolutely DO NOT return anything related to games or gaming. Return ONLY the query keywords.
@@ -414,7 +364,7 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
     const query = await generateTechTrendQuery();
     const exa = getExa();
     const oneDayAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-    
+
     console.log(`      🔍 Deep searching Exa for latest developments on: "${query}"...`);
     const response = await exa.searchAndContents(
       query,
@@ -433,7 +383,7 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
         } as any
       }
     );
-    
+
     let searchContext = '';
     const articles: NewsArticle[] = [];
     if (response.results && response.results.length > 0) {
@@ -449,7 +399,7 @@ export async function fetchLatestAINews(): Promise<{ context: string; articles: 
         return `[Article ${i + 1}] Title: ${res.title}\nContext: ${highlightStr}\n`;
       }).join('\n');
     }
-    
+
     return { context: searchContext, articles };
   } catch (error: any) {
     console.warn('      ⚠️ Exa news search failed:', error.message || error);
@@ -464,15 +414,15 @@ async function filterDuplicateNews(articles: NewsArticle[], recentPosts: string[
   if (articles.length === 0 || recentPosts.length === 0) {
     return articles;
   }
-  
+
   console.log(`      🤖 Filtering fetched news against ${recentPosts.length} recent posts...`);
-  
+
   const articlesFormatted = articles.map((art, idx) => {
     return `[Article ${idx + 1}] Title: ${art.title}\nUrl: ${art.url}`;
   }).join('\n\n');
-  
+
   const postsFormatted = recentPosts.map((post, idx) => `[Post ${idx + 1}] "${post.replace(/\n/g, ' ')}"`).join('\n');
-  
+
   const prompt = `You are a tech/AI news filtering agent.
 We want to avoid publishing posts about news events, company updates, or specific announcements that we have already posted about recently.
 
@@ -501,7 +451,7 @@ Do not include markdown code block formatting (like \`\`\`json). Return ONLY the
     const distinctArticles = distinctIndices
       .map(idx => articles[idx - 1])
       .filter((art): art is NewsArticle => !!art);
-    
+
     console.log(`      🤖 Filtered out ${articles.length - distinctArticles.length} duplicate/similar news topics.`);
     return distinctArticles;
   } catch (err: any) {
@@ -518,12 +468,12 @@ export async function generateTweetFromNews(
   options?: { isHarsh?: boolean }
 ): Promise<{ text: string; imageUrls?: string[] }> {
   const isHarsh = options?.isHarsh ?? false;
-  let systemInstruction = isHarsh 
-    ? (HARSH_TWEET_SYSTEM_PROMPT + "\n- CRITICAL: Make this a harsh, too much direct attack or roast, calling out trends, companies, or people directly and bluntly.") 
+  let systemInstruction = isHarsh
+    ? (HARSH_TWEET_SYSTEM_PROMPT + "\n- CRITICAL: Make this a harsh, too much direct attack or roast, calling out trends, companies, or people directly and bluntly.")
     : TWEET_SYSTEM_PROMPT;
-  
+
   const news = await fetchLatestAINews();
-  
+
   if (!news.context || news.articles.length === 0) {
     console.log('      ⚠️ No news context available. Generating a general AI/tech topic post as fallback...');
     const generalPrompts = [
@@ -534,16 +484,16 @@ export async function generateTweetFromNews(
       "software engineers trying to use AI to write code that they don't understand"
     ];
     const fallbackTopic = generalPrompts[Math.floor(Math.random() * generalPrompts.length)]!;
-    
+
     const prompt = `Write a short post about this trend: "${fallbackTopic}"`;
     const text = await generateText(prompt, systemInstruction);
     // Text-only is the default normal behavior. No fallback image searches.
     return { text, imageUrls: [] };
   }
-  
+
   // Filter the fetched articles based on recent posts
   const distinctArticles = await filterDuplicateNews(news.articles, recentPosts);
-  
+
   if (distinctArticles.length === 0) {
     console.log('      ⚠️ All fetched news articles are similar to recent posts. Generating a distinct general AI/tech topic post...');
     const prompt = `Here are the last 15 posts we made:
@@ -559,7 +509,7 @@ Choose or generate a topic from this list (or create a new similar engineering/A
 
 Write a short, witty, cynical post (under 280 characters) about the chosen topic. Ensure the topic is distinct from the recent posts.`;
     const text = await generateText(prompt, systemInstruction);
-    
+
     // Text-only is the default normal behavior. No fallback image searches.
     return { text, imageUrls: [] };
   }
@@ -572,7 +522,7 @@ Write a short, witty, cynical post (under 280 characters) about the chosen topic
     const highlightStr = art.highlights ? art.highlights.join(' ') : '';
     return `[Article ${idx + 1}] Title: ${art.title}\nContext: ${highlightStr}\n`;
   }).join('\n');
-  
+
   const prompt = `Here are some recent news articles and developments in artificial intelligence and tech:
 ${distinctContext}
 
@@ -599,7 +549,7 @@ Ensure it is a valid JSON object. Do not include markdown code block formatting 
     const text = data.tweet;
     const imageRequired = !!data.image_required;
     const selectedArticle = candidateArticles[index - 1] || candidateArticles[0];
-    
+
     // Build candidate image URLs ONLY if the AI explicitly marked it as required
     const candidateUrls: string[] = [];
     if (imageRequired && selectedArticle) {
@@ -628,7 +578,7 @@ ${distinctContext}
 Choose the most interesting, significant, or hype-worthy development from the list (focusing on AI companies, models, chips, hardware, or startup funding) and write a short, witty, cynical, or sharp post about it. Do not just list the news; share a strong developer perspective, commentary, or critical/cynical take on it.
 Do not include links, write the post directly.`;
     const text = await generateText(fallbackPrompt, systemInstruction);
-    
+
     return { text, imageUrls: [] };
   }
 }
@@ -638,13 +588,13 @@ Do not include links, write the post directly.`;
  */
 export async function isTechRelated(text: string): Promise<boolean> {
   if (!text || !text.trim()) return false;
-  
-  const prompt = `Analyze the following tweet text and determine if it is strictly related to tech and AI/ML (artificial intelligence, machine learning, deep learning, software engineering, developer tools, AI startup or enterprise news).
+
+  const prompt = `Analyze the following tweet text and determine if it is related to artificial intelligence (AI), machine learning (ML), programming specifically related to AI/ML (such as Python, JS, C++ for ML, CUDA), or AI/ML research papers.
   
   Tweet text: "${text}"
 
-  Respond with ONLY "YES" if the tweet is strictly about tech and AI/ML.
-  Respond with ONLY "NO" if the tweet is about games, gaming, consoles, entertainment, politics, sports, general non-tech topics, or any other topic. Do not explain your reasoning.`;
+  Respond with ONLY "YES" if the tweet is strictly about AI, ML, AI/ML programming, or AI/ML research papers.
+  Respond with ONLY "NO" if the tweet is about anything else (including games/gaming, general technology, other programming topics, politics, or general news). Do not explain your reasoning.`;
 
   try {
     const response = await generateText(prompt, "Respond with only YES or NO.");

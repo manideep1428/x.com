@@ -87,71 +87,6 @@ function updateEnvFile(key: string, value: string): void {
   }
 }
 
-// Helper to request human review in console before posting
-async function askHumanReview(type: string, content: string, target?: { text: string, url: string }): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-
-  return new Promise((resolve) => {
-    console.log(`\n==================================================`);
-    console.log(`🚨 HUMAN REVIEW REQUIRED [${type.toUpperCase()}]`);
-    console.log(`==================================================`);
-    if (target) {
-      console.log(`🔗 Target URL: ${target.url}`);
-      console.log(`📝 Target Text: "${target.text.substring(0, 150)}${target.text.length > 150 ? '...' : ''}"`);
-      console.log(`--------------------------------------------------`);
-    }
-    console.log(`Proposed Post:\n\x1b[36m"${content}"\x1b[0m`);
-    console.log(`==================================================`);
-    
-    rl.question('Approve and post? (y/n): ', (answer) => {
-      rl.close();
-      const approved = answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes';
-      resolve(approved);
-    });
-  });
-}
-
-// Helper to choose a tweet from the feed
-async function askTweetSelection(candidates: { text: string; url: string; hasVideo: boolean }[]): Promise<number> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-
-  return new Promise((resolve) => {
-    console.log(`\n==================================================`);
-    console.log(`📢 SELECT A TWEET FROM THE FEED TO INTERACT WITH`);
-    console.log(`==================================================`);
-    candidates.forEach((cand, idx) => {
-      let author = 'Unknown';
-      try {
-        const urlObj = new URL(cand.url);
-        const pathSegments = urlObj.pathname.split('/').filter(Boolean);
-        author = pathSegments[0] ? `@${pathSegments[0]}` : 'Unknown';
-      } catch {}
-      const cleanText = cand.text.trim().replace(/\n/g, ' ');
-      const preview = cleanText.substring(0, 100) + (cleanText.length > 100 ? '...' : '');
-      console.log(`[${idx + 1}] ${author}: "${preview}" (Video: ${cand.hasVideo ? 'YES' : 'NO'})`);
-    });
-    console.log(`[0] Skip this iteration`);
-    console.log(`==================================================`);
-
-    rl.question('Choose a tweet index (0 to skip): ', (answer) => {
-      rl.close();
-      const num = parseInt(answer.trim(), 10);
-      if (isNaN(num) || num < 0 || num > candidates.length) {
-        console.log('   ⚠️ Invalid selection, defaulting to skip (0).');
-        resolve(0);
-      } else {
-        resolve(num);
-      }
-    });
-  });
-}
-
 // Function to check if logged in
 async function checkLoginStatus(page: Page): Promise<boolean> {
   const currentUrl = page.url();
@@ -261,12 +196,6 @@ async function postAINews(page: Page): Promise<boolean> {
   }
   console.log(`      Generated tweet content (length: ${tweetContent.length}):\n"${tweetContent}"`);
 
-  const approved = await askHumanReview('New Post (AI News)', tweetContent);
-  if (!approved) {
-    console.log('   ❌ Post rejected by human review.');
-    return false;
-  }
-
   let tempImagePath: string | null = null;
   if (imageUrls && imageUrls.length > 0) {
     console.log(`      Found candidate image URLs:`, imageUrls);
@@ -338,8 +267,8 @@ async function postAINews(page: Page): Promise<boolean> {
 }
 
 // Action: Reply to a tweet
-async function replyToTweet(page: Page, tweetText: string, statusUrl: string, isHarsh: boolean = false): Promise<boolean> {
-  console.log(`   ✍️ Sub-Action: Replying to the selected tweet... (Tone: ${isHarsh ? 'HARSH' : 'NORMAL'})`);
+async function replyToTweet(page: Page, tweetText: string, statusUrl: string, tone: string): Promise<boolean> {
+  console.log(`   ✍️ Sub-Action: Replying to the selected tweet... (Tone: ${tone.toUpperCase()})`);
 
   // Fail-safe check: do not reply if the current tweet detail page is our own tweet
   if (myUsername) {
@@ -393,7 +322,7 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string, is
   let attempts = 0;
   const maxAttempts = 5;
   while (attempts < maxAttempts) {
-    replyContent = await generateReplyWithSearch(targetTweetText, isHarsh);
+    replyContent = await generateReplyWithSearch(targetTweetText, tone);
     const isDupOrSimilar = await isSimilarToRecentPosts(replyContent);
     if (!isDupOrSimilar) {
       break;
@@ -402,12 +331,6 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string, is
     attempts++;
   }
   console.log(`      Generated reply:\n"${replyContent}"`);
-
-  const approved = await askHumanReview('Reply', replyContent, { text: targetTweetText, url: statusUrl });
-  if (!approved) {
-    console.log('   ❌ Reply rejected by human review.');
-    return false;
-  }
 
   if (replyToCommentIndex !== -1) {
     const clickedReply = await page.evaluate((index) => {
@@ -461,14 +384,14 @@ async function replyToTweet(page: Page, tweetText: string, statusUrl: string, is
   const submitClicked = await page.evaluate(() => {
     const dialog = document.querySelector('[role="dialog"]');
     const container = dialog || document;
-    
+
     // Try data-testid="tweetButton"
     const btn1 = container.querySelector('[data-testid="tweetButton"]') as HTMLElement;
     if (btn1) {
       btn1.click();
       return true;
     }
-    
+
     // Try data-testid="tweetButtonInline"
     const btn2 = container.querySelector('[data-testid="tweetButtonInline"]') as HTMLElement;
     if (btn2) {
@@ -521,8 +444,8 @@ async function repostTweet(page: Page, statusUrl: string): Promise<boolean> {
 }
 
 // Action: Quote Repost (Repost with thoughts)
-async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHarsh: boolean = false): Promise<boolean> {
-  console.log(`   💬 Sub-Action: Quote-Reposting the selected tweet... (Tone: ${isHarsh ? 'HARSH' : 'NORMAL'})`);
+async function quoteTweet(page: Page, tweetText: string, statusUrl: string, tone: string): Promise<boolean> {
+  console.log(`   💬 Sub-Action: Quote-Reposting the selected tweet... (Tone: ${tone.toUpperCase()})`);
 
   // Fail-safe check: do not quote-repost if the current tweet detail page is our own tweet
   if (myUsername) {
@@ -545,8 +468,12 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
   let attempts = 0;
   const maxAttempts = 5;
   let systemInstruction = QUOTE_SYSTEM_PROMPT;
-  if (isHarsh) {
-    systemInstruction += "\n- CRITICAL: Make this comment a harsh, too much direct attack or roast, calling out the target post's ideas or author directly and bluntly.";
+  if (tone === 'super_harsh') {
+    systemInstruction += "\n- CRITICAL: Make this comment a brutally honest, extremely savage, cynical, and sarcastic roast, calling out the target post directly and bluntly based on verified facts.";
+  } else if (tone === 'doubt_clarifying') {
+    systemInstruction += "\n- CRITICAL: Make this comment raise skepticism or ask a clarifying question questioning the claims, dates, or details of the post.";
+  } else if (tone === 'good') {
+    systemInstruction += "\n- CRITICAL: Make this comment positive and encouraging.";
   }
 
   while (attempts < maxAttempts) {
@@ -563,12 +490,6 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
   }
   console.log(`      Generated quote thoughts:\n"${commentary}"`);
 
-  const approved = await askHumanReview('Quote Repost', commentary, { text: tweetText, url: statusUrl });
-  if (!approved) {
-    console.log('   ❌ Quote repost rejected by human review.');
-    return false;
-  }
-
   await page.waitForSelector('[data-testid="retweet"], [data-testid="unretweet"]', { timeout: 10000 });
   await page.click('[data-testid="retweet"], [data-testid="unretweet"]');
   await delay(1500);
@@ -584,8 +505,8 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
       const text = (item.textContent || '').trim().toLowerCase();
       const testid = item.getAttribute('data-testid') || '';
       if (
-        text.includes('quote') || 
-        testid === 'QuoteTweet' || 
+        text.includes('quote') ||
+        testid === 'QuoteTweet' ||
         testid === 'quote'
       ) {
         (item as HTMLElement).click();
@@ -609,7 +530,7 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
   // Wait for the composer (textarea) inside the modal dialog
   const textareaSelector = '[role="dialog"] [data-testid="tweetTextarea_0"], [data-testid="tweetTextarea_0"]';
   await page.waitForSelector(textareaSelector, { timeout: 10000 });
-  
+
   // Focus/Click the textarea, prioritizing the one in the modal dialog
   await page.evaluate(() => {
     const dialogTextarea = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') as HTMLElement;
@@ -631,14 +552,14 @@ async function quoteTweet(page: Page, tweetText: string, statusUrl: string, isHa
   const submitClicked = await page.evaluate(() => {
     const dialog = document.querySelector('[role="dialog"]');
     const container = dialog || document;
-    
+
     // Try data-testid="tweetButton"
     const btn1 = container.querySelector('[data-testid="tweetButton"]') as HTMLElement;
     if (btn1) {
       btn1.click();
       return true;
     }
-    
+
     // Try data-testid="tweetButtonInline"
     const btn2 = container.querySelector('[data-testid="tweetButtonInline"]') as HTMLElement;
     if (btn2) {
@@ -687,6 +608,21 @@ async function likeTweet(page: Page): Promise<boolean> {
 }
 
 
+let postHistory: number[] = [];
+
+// Helper to get the current hour in San Francisco (Pacific Time)
+function getSFHour(): number {
+  const now = new Date();
+  const sfTimeStr = now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', hour12: false });
+  return parseInt(sfTimeStr, 10);
+}
+
+// Helper to check if it's the 10-hour silent rest period in SF (10 PM to 8 AM)
+function isSFSilentPeriod(): boolean {
+  const sfHour = getSFHour();
+  return sfHour >= 22 || sfHour < 8;
+}
+
 // Main Automation Runner
 async function run() {
   // Check if testing mode (short intervals, 2 iterations) is enabled
@@ -709,7 +645,7 @@ async function run() {
     let browser: any = null;
     try {
       browser = await puppeteer.launch({
-        headless: true,
+        headless: false,
         executablePath: chromePath,
         userDataDir,
         protocolTimeout: 240000, // 4 minutes timeout to prevent infinite hanging
@@ -831,6 +767,24 @@ async function run() {
       // --- Start Scheduling Loop ---
       let iterationsWithCurrentBrowser = 0;
       while (true) {
+        // Check SF silent period: silent for 10 hours (10 PM to 8 AM SF Time)
+        if (!isTestMode && isSFSilentPeriod()) {
+          console.log(`💤 SF Silent Period active (10 PM - 8 AM SF Time). Resting silently...`);
+          await delay(15 * 60 * 1000); // Wait 15 minutes before checking timezone again
+          continue;
+        }
+
+        // Enforce rate limits: max 70 posts per 12 hours
+        const now = Date.now();
+        postHistory = postHistory.filter(t => now - t < 12 * 60 * 60 * 1000);
+        if (!isTestMode && postHistory.length >= 70) {
+          const oldestPost = postHistory[0]!;
+          const msToWait = (12 * 60 * 60 * 1000) - (now - oldestPost);
+          console.log(`⚠️ 12-hour post limit (70 posts) reached. Waiting for ${Math.ceil(msToWait / 60000)} minutes until oldest post expires...`);
+          await delay(msToWait);
+          continue;
+        }
+
         iterationsWithCurrentBrowser++;
         const iterStr = isTestMode ? `${i} of 2` : `${i}`;
         console.log(`\n========================================`);
@@ -845,132 +799,154 @@ async function run() {
         }
 
         // Roll a random action:
-        // - 60% Quote Repost (repost with quote/thoughts)
-        // - 40% Reply (comment)
-        const isQuote = Math.random() < 0.60;
-        const isHarsh = Math.random() < 0.10; // 10% chance for a harsh direct attack
+        // - 40% Post (AI News)
+        // - 30% Reply (Comment)
+        // - 30% Retweet (Quote Repost)
+        const actionRoll = Math.random();
+        let action: 'post' | 'reply' | 'retweet';
+        if (actionRoll < 0.40) {
+          action = 'post';
+        } else if (actionRoll < 0.70) {
+          action = 'reply';
+        } else {
+          action = 'retweet';
+        }
+
+        // Roll tone:
+        // - 20% super_harsh
+        // - 30% doubt_clarifying
+        // - 30% good
+        // - 20% random (funny/sarcastic/whatever)
+        const toneRoll = Math.random();
+        let tone: 'super_harsh' | 'doubt_clarifying' | 'good' | 'random';
+        if (toneRoll < 0.20) {
+          tone = 'super_harsh';
+        } else if (toneRoll < 0.50) {
+          tone = 'doubt_clarifying';
+        } else if (toneRoll < 0.80) {
+          tone = 'good';
+        } else {
+          tone = 'random';
+        }
+
         let success = false;
         let shouldRelaunch = false;
 
         try {
-          // Action: Interact with timeline tweet
-          console.log(`   📰 Action: Interacting with a timeline tweet (${isQuote ? 'Quote Repost' : 'Reply'})...`);
+          if (action === 'post') {
+            console.log(`   🔥 Action: Creating a new post based on latest AI/tech news (Auto)...`);
+            success = await postAINews(page);
+          } else {
+            console.log(`   📰 Action: Interacting with a timeline tweet (Action: ${action.toUpperCase()}, Tone: ${tone.toUpperCase()}) (Auto)...`);
 
-          // Scroll feed to ensure 20+ tweets are loaded
-          await scrollFeed(page, 22);
+            // Scroll feed to ensure 22+ tweets are loaded
+            await scrollFeed(page, 22);
 
-          // Extract all tweet text and status URLs inside the page execution context
-          // This avoids passing ElementHandles that could become detached.
-          const gatheredTweets = await page.evaluate(() => {
-            const tweetElements = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
-            return tweetElements.map((el) => {
-              const textEl = el.querySelector('[data-testid="tweetText"]');
-              const text = textEl ? textEl.textContent || '' : '';
+            // Extract all tweet text and status URLs inside the page execution context
+            const gatheredTweets = await page.evaluate(() => {
+              const tweetElements = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+              return tweetElements.map((el) => {
+                const textEl = el.querySelector('[data-testid="tweetText"]');
+                const text = textEl ? textEl.textContent || '' : '';
 
-              const links = Array.from(el.querySelectorAll('a')) as HTMLAnchorElement[];
-              const statusLink = links.find((link) => link.href.includes('/status/'));
-              const url = statusLink ? statusLink.href : '';
+                const links = Array.from(el.querySelectorAll('a')) as HTMLAnchorElement[];
+                const statusLink = links.find((link) => link.href.includes('/status/'));
+                const url = statusLink ? statusLink.href : '';
 
-              const hasVideo = !!el.querySelector('video, [data-testid="videoPlayer"]');
+                const hasVideo = !!el.querySelector('video, [data-testid="videoPlayer"]');
 
-              return { text, url, hasVideo };
-            }).filter((t) => t.url !== '');
-          });
+                return { text, url, hasVideo };
+              }).filter((t) => t.url !== '');
+            });
 
-          console.log(`      Total visible tweets gathered: ${gatheredTweets.length}`);
+            console.log(`      Total visible tweets gathered: ${gatheredTweets.length}`);
 
-          if (!myUsername) {
-            myUsername = await getCurrentUsername(page);
-            if (myUsername) {
-              console.log(`      👤 Detected username in timeline check: @${myUsername}`);
-            }
-          }
-
-          // Filter out our own tweets and previously interacted tweets from timeline feed
-          let filteredTweets = gatheredTweets.filter((t: any) => {
-            // Check persistent history memory first
-            if (hasInteractedWithUrl(t.url)) {
-              console.log(`      Skipping previously interacted tweet: ${t.url}`);
-              return false;
-            }
-
-            if (myUsername) {
-              try {
-                const urlObj = new URL(t.url);
-                const pathSegments = urlObj.pathname.split('/').filter(Boolean);
-                const author = pathSegments[0];
-                if (author && author.toLowerCase() === myUsername.toLowerCase()) {
-                  console.log(`      Skipping own tweet in timeline: ${t.url}`);
-                  return false;
-                }
-              } catch {
-                // Ignore URL parsing issues
+            if (!myUsername) {
+              myUsername = await getCurrentUsername(page);
+              if (myUsername) {
+                console.log(`      👤 Detected username in timeline check: @${myUsername}`);
               }
             }
-            return true;
-          });
 
-          if (filteredTweets.length < 5) {
-            throw {
-              name: 'SkipIteration',
-              message: 'Too few tweets after filtering out own and interacted tweets.'
-            };
-          }
+            // Filter out our own tweets and previously interacted tweets from timeline feed
+            let filteredTweets = gatheredTweets.filter((t: any) => {
+              if (hasInteractedWithUrl(t.url)) {
+                console.log(`      Skipping previously interacted tweet: ${t.url}`);
+                return false;
+              }
 
-          // Scan the filtered tweets for tech/AI related tweets
-          const techCandidates: typeof filteredTweets = [];
-          console.log(`      Scanning feed for tech/AI related tweets...`);
-          // We can check up to the first 25 tweets on the feed
-          const maxCheck = Math.min(25, filteredTweets.length);
-          for (let idx = 0; idx < maxCheck; idx++) {
-            const candidateTweet = filteredTweets[idx]!;
-            const isTech = await isTechRelated(candidateTweet.text);
-            if (isTech) {
-              techCandidates.push(candidateTweet);
+              if (myUsername) {
+                try {
+                  const urlObj = new URL(t.url);
+                  const pathSegments = urlObj.pathname.split('/').filter(Boolean);
+                  const author = pathSegments[0];
+                  if (author && author.toLowerCase() === myUsername.toLowerCase()) {
+                    console.log(`      Skipping own tweet in timeline: ${t.url}`);
+                    return false;
+                  }
+                } catch {
+                  // Ignore URL parsing issues
+                }
+              }
+              return true;
+            });
+
+            if (filteredTweets.length < 5) {
+              throw {
+                name: 'SkipIteration',
+                message: 'Too few tweets after filtering out own and interacted tweets.'
+              };
             }
-            // Limit checking to not overload LLM check calls, say max 8 candidates
-            if (techCandidates.length >= 8) {
-              break;
+
+            // Scan the filtered tweets for tech/AI related tweets
+            const techCandidates: typeof filteredTweets = [];
+            console.log(`      Scanning feed for tech/AI related tweets...`);
+            const maxCheck = Math.min(25, filteredTweets.length);
+            for (let idx = 0; idx < maxCheck; idx++) {
+              const candidateTweet = filteredTweets[idx]!;
+              const isTech = await isTechRelated(candidateTweet.text);
+              if (isTech) {
+                techCandidates.push(candidateTweet);
+              }
+              if (techCandidates.length >= 8) {
+                break;
+              }
+            }
+
+            if (techCandidates.length === 0) {
+              throw {
+                name: 'SkipIteration',
+                message: 'No tech/AI related tweets found in the feed.'
+              };
+            }
+
+            // Autonomously select the first tech candidate
+            const selectedTweet = techCandidates[0]!;
+            const tweetText = selectedTweet.text;
+            const statusUrl = selectedTweet.url;
+
+            console.log(`      Selected tweet: ${statusUrl}`);
+            console.log(`      Found tweet content: "${tweetText.substring(0, 80).replace(/\n/g, ' ')}..."`);
+            console.log(`      Navigating to tweet detail page: ${statusUrl}`);
+
+            await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
+            await delay(5000);
+
+            // Sub-action: Like the tweet with a 50% chance
+            const shouldAlsoLike = Math.random() < 0.50;
+            if (shouldAlsoLike) {
+              await likeTweet(page);
+            }
+
+            if (action === 'retweet') {
+              success = await quoteTweet(page, tweetText, statusUrl, tone);
+            } else {
+              success = await replyToTweet(page, tweetText, statusUrl, tone);
             }
           }
 
-          if (techCandidates.length === 0) {
-            throw {
-              name: 'SkipIteration',
-              message: 'No tech/AI related tweets found in the feed.'
-            };
-          }
-
-          // Let the human choose from the candidates
-          const selection = await askTweetSelection(techCandidates);
-          if (selection === 0) {
-            throw {
-              name: 'SkipIteration',
-              message: 'User skipped tweet selection.'
-            };
-          }
-
-          const selectedTweet = techCandidates[selection - 1]!;
-          const tweetText = selectedTweet.text;
-          const statusUrl = selectedTweet.url;
-
-          console.log(`      Selected tweet: ${statusUrl}`);
-          console.log(`      Found tweet content: "${tweetText.substring(0, 80).replace(/\n/g, ' ')}..."`);
-          console.log(`      Navigating to tweet detail page: ${statusUrl}`);
-
-          await page.goto(statusUrl, { waitUntil: 'load', timeout: 30000 });
-          await delay(5000);
-
-          // Sub-action: Like the tweet with a 50% chance
-          const shouldAlsoLike = Math.random() < 0.50;
-          if (shouldAlsoLike) {
-            await likeTweet(page);
-          }
-
-          if (isQuote) {
-            success = await quoteTweet(page, tweetText, statusUrl, isHarsh);
-          } else {
-            success = await replyToTweet(page, tweetText, statusUrl, isHarsh);
+          if (success) {
+            postHistory.push(Date.now());
           }
         } catch (err: any) {
           if (err && err.name === 'SkipIteration') {
@@ -992,11 +968,10 @@ async function run() {
         // Calculate delay before the next action using JS random timer math
         let waitTimeSeconds = 0;
         if (isTestMode) {
-          // In test mode, wait 15 seconds
           waitTimeSeconds = 15;
         } else {
-          // Randomize wait time between 2 minutes (120s) and 4 minutes (240s)
-          waitTimeSeconds = Math.floor(Math.random() * (240 - 120 + 1)) + 120;
+          // Randomize wait time between 5 minutes (300s) and 40 minutes (2400s)
+          waitTimeSeconds = Math.floor(Math.random() * (2400 - 300 + 1)) + 300;
         }
 
         console.log(`⏳ Waiting for ${waitTimeSeconds} seconds before next iteration...`);
