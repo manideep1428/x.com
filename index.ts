@@ -645,7 +645,7 @@ async function run() {
     let browser: any = null;
     try {
       browser = await puppeteer.launch({
-        headless: false,
+        headless: true,
         executablePath: chromePath,
         userDataDir,
         protocolTimeout: 240000, // 4 minutes timeout to prevent infinite hanging
